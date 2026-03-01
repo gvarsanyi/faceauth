@@ -1,0 +1,13 @@
+# /etc/pam.d/kde-fingerprint
+#
+# PAM service for the KDE Plasma lockscreen non-interactive authentication slot.
+# kscreenlocker runs this service in a background thread while the password
+# dialog is shown; a successful match unlocks the screen immediately, with no
+# user interaction required.
+#
+# This file is created by faceauth's install.sh only when no kde-fingerprint
+# service already exists (i.e. fprintd is not configured).  If you later
+# install fprintd, prepend the faceauth line to the fprintd configuration.
+
+auth    sufficient    pam_faceauth.so
+auth    required      pam_deny.so

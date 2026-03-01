@@ -1,0 +1,13 @@
+[package]
+name = "faceauth-pam"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "pam_faceauth"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+faceauth-core = { path = "../faceauth-core" }
+pamsm = { version = "0.5.5", features = ["libpam"] }
+libc = "0.2"

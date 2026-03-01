@@ -1,0 +1,32 @@
+[Unit]
+Description=faceauth face model management daemon
+Documentation=https://github.com/gvarsanyi/faceauth
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/faceauth-daemon
+Restart=on-failure
+
+# Run as a dedicated system user with no login shell.
+User=faceauthd
+Group=faceauthd
+
+# The daemon needs to read/write /etc/security/faceauth/ (owned by the
+# faceauth system user) and create /run/faceauth/ for the socket.
+RuntimeDirectory=faceauth
+RuntimeDirectoryMode=0755
+
+# Harden the service: restrict what it can do beyond its specific needs.
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/etc/security/faceauth
+PrivateTmp=true
+NoNewPrivileges=true
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=true
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

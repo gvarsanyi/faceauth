@@ -1,0 +1,10 @@
+# pam-config(8) module definition for pam_faceauth.so
+# Installed to /usr/lib/pam-config.d/pam_faceauth by install.sh.
+# Enabled with: pam-config --add --faceauth
+#
+# Auth-Priority 512 places faceauth before pam_unix so a successful face match
+# short-circuits the stack immediately (sufficient).
+
+[pam_faceauth.so]
+Auth: auth    sufficient    pam_faceauth.so
+Auth-Priority: 512

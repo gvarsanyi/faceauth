@@ -1,0 +1,16 @@
+[package]
+name = "faceauth-core"
+version.workspace = true
+edition.workspace = true
+build = "build.rs"
+
+[build-dependencies]
+bzip2 = "0.4"
+
+[dependencies]
+dlib-face-recognition = { workspace = true }
+nokhwa = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+libc = "0.2"

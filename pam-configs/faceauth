@@ -1,0 +1,8 @@
+Name: faceauth face recognition
+Default: yes
+Priority: 512
+Auth-Type: Primary
+Auth:
+        [success=end default=ignore]    pam_faceauth.so
+Auth-Initial:
+        [success=end default=ignore]    pam_faceauth.so

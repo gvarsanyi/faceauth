@@ -1,0 +1,13 @@
+[package]
+name = "faceauth-daemon"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "faceauth-daemon"
+path = "src/main.rs"
+
+[dependencies]
+faceauth-core = { path = "../faceauth-core" }
+serde_json = { workspace = true }
+libc = "0.2"
