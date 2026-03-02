@@ -10,6 +10,7 @@ A facial recognition authentication system for Linux, written in Rust. Integrate
 - Authenticate users by comparing live camera feed against stored face models
 - PAM module integration for system-level authentication
 - CLI for enrollment, testing, and management
+- Per-user controls: disable face auth globally or ignore specific PAM services/applications
 - Desktop notifications for authentication events (start, success, failure) via D-Bus
 - Secure model storage with atomic writes and strict file permissions
 - Fallback support — returns `AUTHINFO_UNAVAIL` on any non-match (no model enrolled, camera unavailable, timeout, etc.), allowing the PAM stack to fall through to password auth
@@ -22,7 +23,7 @@ The project is a Cargo workspace with five crates:
 |---|---|---|
 | `faceauth-core` | Library | Face detection, encoding, matching, and model persistence |
 | `faceauth-cli` | Binary | CLI for enrollment, testing, and management |
-| `faceauth-daemon` | Binary | Privileged daemon that writes model files on behalf of users |
+| `faceauth-daemon` | Binary | Privileged daemon that owns camera access, runs authentication, and persists face models |
 | `faceauth-pam` | cdylib | PAM module for system authentication |
 | `faceauth-notify` | Binary | Desktop notification helper spawned by the PAM module |
 
@@ -65,7 +66,7 @@ a password if required. It installs:
 - `target/release/faceauth` → `/usr/bin/faceauth`
 - `target/release/faceauth-daemon` → `/usr/libexec/faceauth-daemon`
 - `target/release/faceauth-notify` → `/usr/libexec/faceauth-notify`
-- `target/release/libpam_faceauth.so` → `/lib/security/pam_faceauth.so`
+- `target/release/libpam_faceauth.so` → `/usr/lib64/security/pam_faceauth.so` (or `/usr/lib/security/` depending on distro)
 - Creates the `faceauthd` system user (if not present)
 - Creates `/etc/security/faceauth/` with `750` permissions owned by `faceauthd`
 - Installs and starts the `faceauth-daemon` systemd service
@@ -74,15 +75,15 @@ a password if required. It installs:
 
 ### How privilege works
 
-The daemon runs as the `faceauthd` system user and is the only process with write access to `/etc/security/faceauth/`. When a user runs `faceauth add` or `faceauth clear`, the CLI:
+The daemon runs as the `faceauthd` system user and is the only process with access to the camera at authentication time and write access to `/etc/security/faceauth/`. When a user runs `faceauth add` or `faceauth clear`, the CLI:
 
-1. Captures the face encoding locally (camera access stays with the user's session)
-2. Connects to `/run/faceauth/faceauth.sock`
-3. Sends the encoding (or a clear request) to the daemon
+1. Connects to `/run/faceauth/faceauth.sock`
+2. Requests a face capture from the daemon (`CaptureEncoding`), which opens the camera and returns the encoding
+3. Sends the encoding (or a clear request) to the daemon (`Enroll` / `Clear`)
 
 The daemon uses `SO_PEERCRED` to obtain the caller's UID from the kernel — this cannot be forged — and only allows a user to modify their own model. Root (UID 0) may manage any user's model.
 
-If the daemon is not running, the CLI falls back to direct file access (requires root).
+All CLI commands that modify state (`add`, `clear`) require the daemon and will exit with an error if it is unavailable.
 
 ## Usage
 
@@ -99,7 +100,7 @@ The current user's account is used by default. Root may pass `--user USERNAME`
 faceauth add
 ```
 
-Position your face in front of the camera. The tool waits up to 30 seconds for a single face to be detected, captures an encoding, and sends it to the daemon for storage. Run multiple times to enroll different angles or lighting conditions.
+Position your face in front of the camera. The tool captures 5 encodings, prompting you to vary your angle between captures to improve recognition accuracy. Each capture waits up to 30 seconds for a single face to be detected.
 
 ### Test authentication
 
@@ -121,7 +122,26 @@ faceauth clear
 faceauth info
 ```
 
-Prints the number of stored encodings, the enrolled camera's stable udev identifiers and fallback index, the L2 norm of each encoding (expect ~1.0 for valid dlib descriptors), and pairwise Euclidean distances between encodings when more than one is stored.
+Prints the enrolled camera's stable udev identifiers and fallback index, the number of stored encoding batches, and whether face auth is disabled or any applications are in the ignore list.
+
+### Disable / enable face authentication
+
+```bash
+faceauth disable       # skip face auth, fall through to password
+faceauth enable        # re-enable face auth
+```
+
+The `disabled` flag is stored in the model file. When set, the PAM module skips face authentication entirely and returns `AUTHINFO_UNAVAIL`, allowing the next PAM module (e.g. `pam_unix`) to handle the request.
+
+### Ignore specific applications
+
+```bash
+faceauth ignore sudo          # never use face auth when sudo asks
+faceauth ignore kscreenlocker # skip for the lock screen
+faceauth unignore sudo        # remove sudo from the ignore list
+```
+
+The ignore list stores PAM service names (e.g. `sudo`, `login`) and parent process names. When either the PAM service or the parent process of the authenticating process matches an entry, face authentication is silently skipped.
 
 ### List cameras
 
@@ -137,6 +157,8 @@ Lists all detected V4L2 camera devices with their index, name, and a suitability
 sudo faceauth --user alice add
 sudo faceauth --user alice clear
 sudo faceauth --user alice info
+sudo faceauth --user alice disable
+sudo faceauth --user alice ignore sudo
 ```
 
 ### Options
@@ -144,7 +166,6 @@ sudo faceauth --user alice info
 `add` accepts:
 - `--timeout SECONDS` (default 30) — time to wait for a face to be detected per capture
 - `--camera INDEX` — select the V4L2 device; required when more than one camera is present (`cameras` shows available indices); the camera's stable udev identifiers (`/dev/v4l/by-id/`, `/dev/v4l/by-path/`) are stored in the model and used to reopen the correct device at authentication, even if the device index changes
-- `--count N` (default 5) — number of encodings to capture; captures are rejected if too similar to a previously captured pose (Euclidean distance < 0.3), so you must actually vary your pose between captures
 
 `test` accepts `--timeout SECONDS` (default 5).
 
@@ -192,11 +213,11 @@ If `kde-fingerprint` already exists (e.g. `fprintd` is configured), `install.sh`
 
 When face authentication is triggered (e.g. by `sudo` or a lock screen), the PAM module spawns `faceauth-notify` to send standard desktop notifications to the user's graphical session via D-Bus (`org.freedesktop.Notifications`).
 
-| Event | Icon | Summary |
-|---|---|---|
-| Authentication started | faceauth icon | "Face Authentication — look at the camera" |
-| Authentication succeeded | `security-high` | "Face Authentication Successful" |
-| Authentication failed | `dialog-warning` | "Face Authentication Failed" |
+| Event | Summary |
+|---|---|
+| Authentication started | "Face Authentication ..." |
+| Authentication succeeded | "Face Authentication Successful" |
+| Authentication failed | "Face Authentication Failed" |
 
 The helper is spawned as the authenticated user (dropping privileges via `setuid`/`setgid`) so it can connect to the correct D-Bus session bus at `/run/user/<uid>/bus`. Notification errors are silently ignored — auth outcome is never affected.
 
@@ -215,15 +236,17 @@ Generated files (`assets/icons/png/` and `assets/icons/*.ico`) are excluded from
 
 ## How It Works
 
-1. **Enrollment**: The CLI captures frames from the camera, detects a face using dlib, and computes a 128-dimensional encoding vector via a ResNet model. It sends the encoding to the daemon over a Unix socket. The daemon verifies the caller's identity via `SO_PEERCRED` and appends the encoding to `/etc/security/faceauth/<uid>.json`.
+1. **Enrollment**: The CLI asks the daemon to capture a face encoding (`CaptureEncoding`). The daemon opens the camera, detects a face using dlib, computes a 128-dimensional encoding vector via a ResNet model, and returns it to the CLI. The CLI then sends the encoding to the daemon (`Enroll`), which verifies the caller's identity via `SO_PEERCRED` and appends it to `/etc/security/faceauth/<uid>.json`.
 
-2. **Authentication**: Fetches the user's stored encodings from the daemon (via `LoadModel`), captures live frames, and computes encodings for any detected faces. A match is found when the Euclidean distance between a live encoding and a stored encoding is below `0.6` (the threshold recommended by dlib). The PAM module runs as root and reads the model file directly.
+2. **Authentication**: The PAM module (or `faceauth test`) sends an `Authenticate` request to the daemon. The daemon loads the user's stored encodings from disk, opens the enrolled camera, and captures live frames in a loop until a match is found or the timeout expires. A match is declared when the Euclidean distance between a live encoding and a stored encoding is below `0.6` (the threshold recommended by dlib). The daemon reports success or failure back over the socket.
 
-3. **PAM integration**: The PAM module wraps the core authentication logic with panic catching to prevent C stack corruption, and maps results to appropriate PAM return codes.
+3. **PAM integration**: The PAM module wraps the daemon call with panic catching to prevent C stack corruption, and maps results to appropriate PAM return codes.
 
 ## Model Storage
 
 Models are stored as JSON files named by numeric UID — `/etc/security/faceauth/<uid>.json` — with permissions `0640`, owned by the enrolled user. Using the UID means enrollments survive username renames. Writes are atomic (temp file + rename) to prevent corruption.
+
+Each file contains the camera identifiers, the face encoding batches, and the per-user control fields (`disabled`, `ignore`). Old model files without those fields are read as `disabled: false, ignore: []` — no migration required.
 
 ## Security Notes
 

@@ -82,8 +82,8 @@ fn prompt_camera(cameras: &[CameraInfo]) -> u32 {
                 }
             }
             eprintln!(
-                "{}",
-                gettext("faceauth: invalid selection '{input}'; expected one of: {options}")
+                "faceauth: {}",
+                gettext("invalid selection '{input}'; expected one of: {options}")
                     .replace("{input}", trimmed)
                     .replace(
                         "{options}",
@@ -159,8 +159,8 @@ pub fn resolve_add_camera(explicit: Option<String>) -> u32 {
             Some(n) => return n,
             None => {
                 eprintln!(
-                    "{}",
-                    gettext("faceauth: could not resolve camera path '{path}'")
+                    "faceauth: {}",
+                    gettext("could not resolve camera path '{path}'")
                         .replace("{path}", &spec)
                 );
                 process::exit(1);
@@ -191,8 +191,8 @@ pub fn resolve_add_camera(explicit: Option<String>) -> u32 {
                 .iter()
                 .map(|(n, _)| format!("/dev/video{}", n))
                 .collect();
-            eprintln!("{}", gettext(
-                "faceauth: '{spec}' is ambiguous - matches: {matches}; use a full path instead (e.g. --camera /dev/video{example})"
+            eprintln!("faceauth: {}", gettext(
+                "'{spec}' is ambiguous - matches: {matches}; use a full path instead (e.g. --camera /dev/video{example})"
             )
             .replace("{spec}", &spec)
             .replace("{matches}", &indices.join(", "))
@@ -202,9 +202,9 @@ pub fn resolve_add_camera(explicit: Option<String>) -> u32 {
     }
 
     eprintln!(
-        "{}",
+        "faceauth: {}",
         gettext(
-            "faceauth: unrecognised camera '{spec}'; use an index, /dev/videoN path, or udev name"
+            "unrecognised camera '{spec}'; use an index, /dev/videoN path, or udev name"
         )
         .replace("{spec}", &spec)
     );

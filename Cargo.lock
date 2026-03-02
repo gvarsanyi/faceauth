@@ -701,7 +701,7 @@ dependencies = [
 
 [[package]]
 name = "faceauth-cli"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "clap",
  "faceauth-core",
@@ -712,7 +712,7 @@ dependencies = [
 
 [[package]]
 name = "faceauth-core"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "bzip2",
  "dlib-face-recognition",
@@ -725,7 +725,7 @@ dependencies = [
 
 [[package]]
 name = "faceauth-daemon"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "faceauth-core",
  "libc",
@@ -734,7 +734,7 @@ dependencies = [
 
 [[package]]
 name = "faceauth-notify"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "gettext-rs",
  "notify-rust",
@@ -742,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "faceauth-pam"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "faceauth-core",
  "libc",

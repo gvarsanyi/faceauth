@@ -11,6 +11,8 @@ Restart=on-failure
 # Run as a dedicated system user with no login shell.
 User=faceauthd
 Group=faceauthd
+# Needed to open /dev/video* devices (owned root:video, mode 0660).
+SupplementaryGroups=video
 
 # The daemon needs to read/write /etc/security/faceauth/ (owned by the
 # faceauth system user) and create /run/faceauth/ for the socket.

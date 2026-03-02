@@ -8,7 +8,7 @@ members = ["faceauth-core", "faceauth-cli", "faceauth-pam", "faceauth-daemon", "
 nokhwa-bindings-linux = { path = "vendor/nokhwa-bindings-linux" }
 
 [workspace.package]
-version = "0.1.0"
+version = "0.8.0"
 edition = "2021"
 
 [workspace.dependencies]

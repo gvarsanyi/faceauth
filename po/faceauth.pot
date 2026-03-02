@@ -30,11 +30,7 @@ msgid "--count must be between 1 and 20"
 msgstr ""
 
 #: faceauth-cli/src/main.rs
-msgid "faceauth: replacing face model for '{user}' ({count} encodings)"
-msgstr ""
-
-#: faceauth-cli/src/main.rs
-msgid "faceauth: enrolling face for '{user}' ({count} encodings)"
+msgid "faceauth: enrolling face for '{user}'"
 msgstr ""
 
 #: faceauth-cli/src/main.rs
@@ -75,10 +71,6 @@ msgstr ""
 
 #: faceauth-cli/src/main.rs
 msgid "[{done}/{total}] captured"
-msgstr ""
-
-#: faceauth-cli/src/main.rs
-msgid "Face model replaced for '{user}'."
 msgstr ""
 
 #: faceauth-cli/src/main.rs

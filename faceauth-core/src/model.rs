@@ -95,41 +95,52 @@ fn encoding_from_hex(s: &str) -> std::result::Result<[f32; 128], String> {
     Ok(out)
 }
 
-/// On-disk serialization format. Encodings are stored as hex strings
+/// On-disk serialization format. Encodings are stored as batches of hex strings
 /// (128 × 8 hex chars = 1024 chars each) for compact, exact representation.
+/// Each inner Vec is one enrollment batch (e.g. 5 captures in one `faceauth add` run).
 #[derive(Debug, Serialize, Deserialize)]
 struct FaceModelDisk {
     version: u32,
-    username: String,
     camera: CameraId,
-    encodings: Vec<String>,
+    /// When true the PAM module skips face auth and falls through to the next module.
+    #[serde(default)]
+    disabled: bool,
+    /// PAM services or parent process names for which face auth is silently skipped.
+    #[serde(default)]
+    ignore: Vec<String>,
+    encodings: Vec<Vec<String>>,
 }
 
 #[derive(Debug)]
 pub struct FaceModel {
     pub version: u32,
-    pub username: String,
     /// Camera used during enrollment. Authentication reuses this so the same
     /// physical device is always used without requiring the caller to remember it.
     pub camera: CameraId,
-    /// 128-dimensional dlib face descriptor vectors.
-    pub encodings: Vec<[f32; 128]>,
+    /// When true the PAM module skips face auth and falls through to the next module.
+    pub disabled: bool,
+    /// PAM services or parent process names for which face auth is silently skipped.
+    pub ignore: Vec<String>,
+    /// Batches of 128-dimensional dlib face descriptor vectors.
+    /// Each inner Vec is one enrollment batch from a single `faceauth add` run.
+    pub encodings: Vec<Vec<[f32; 128]>>,
 }
 
 impl FaceModel {
-    /// Create a new empty model for `username` recorded with `camera`.
-    pub fn new(username: &str, camera: CameraId) -> Self {
+    /// Create a new empty model recorded with `camera`.
+    pub fn new(camera: CameraId) -> Self {
         FaceModel {
-            version: 1,
-            username: username.to_string(),
+            version: 2,
             camera,
+            disabled: false,
+            ignore: Vec::new(),
             encodings: Vec::new(),
         }
     }
 
-    /// Append a 128-D face descriptor to the model's encoding list.
-    pub fn add_encoding(&mut self, encoding: [f32; 128]) {
-        self.encodings.push(encoding);
+    /// Append a batch of 128-D face descriptors to the model.
+    pub fn add_batch(&mut self, batch: Vec<[f32; 128]>) {
+        self.encodings.push(batch);
     }
 }
 
@@ -149,14 +160,18 @@ pub fn load_model_from_json(contents: &str) -> Result<FaceModel> {
     let encodings = disk
         .encodings
         .into_iter()
-        .map(|s| {
-            encoding_from_hex(&s).map_err(FaceAuthError::Dlib)
+        .map(|batch| {
+            batch
+                .into_iter()
+                .map(|s| encoding_from_hex(&s).map_err(FaceAuthError::Dlib))
+                .collect::<Result<Vec<[f32; 128]>>>()
         })
-        .collect::<Result<Vec<[f32; 128]>>>()?;
+        .collect::<Result<Vec<Vec<[f32; 128]>>>>()?;
     Ok(FaceModel {
         version: disk.version,
-        username: disk.username,
         camera: disk.camera,
+        disabled: disk.disabled,
+        ignore: disk.ignore,
         encodings,
     })
 }
@@ -191,7 +206,7 @@ pub fn load_or_create_model(username: &str, camera: CameraId) -> Result<FaceMode
     if model_exists(username)? {
         load_model(username)
     } else {
-        Ok(FaceModel::new(username, camera))
+        Ok(FaceModel::new(camera))
     }
 }
 
@@ -205,20 +220,18 @@ pub fn load_or_create_model(username: &str, camera: CameraId) -> Result<FaceMode
 /// Requires write access to [`MODEL_DIR`] (i.e., must run as root).
 ///
 /// # Errors
-/// - [`FaceAuthError::Storage`] if `username` has no system account or any I/O step fails
+/// - [`FaceAuthError::Storage`] on any I/O step failure
 /// - [`FaceAuthError::Json`] if serialization fails (should never happen)
-pub fn save_model(model: &FaceModel) -> Result<()> {
-    let uid = uid_for_username(&model.username)
-        .ok_or_else(|| FaceAuthError::Storage(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("no system account for '{}'", model.username),
-        )))?;
+pub fn save_model(uid: u32, model: &FaceModel) -> Result<()> {
     let path = model_path(uid);
     let disk = FaceModelDisk {
         version: model.version,
-        username: model.username.clone(),
         camera: model.camera.clone(),
-        encodings: model.encodings.iter().map(encoding_to_hex).collect(),
+        disabled: model.disabled,
+        ignore: model.ignore.clone(),
+        encodings: model.encodings.iter()
+            .map(|batch| batch.iter().map(encoding_to_hex).collect())
+            .collect(),
     };
     let json = serde_json::to_string_pretty(&disk)?;
 
@@ -281,61 +294,100 @@ mod tests {
             by_path: Some("pci-0000:00:14.0-usb-0:2:1.0-video-index0".to_string()),
             index: 2,
         };
-        let mut model = FaceModel::new("bob", camera);
+        let mut model = FaceModel::new(camera);
         let enc = [0.1f32; 128];
-        model.add_encoding(enc);
+        model.add_batch(vec![enc]);
 
         let disk = FaceModelDisk {
             version: model.version,
-            username: model.username.clone(),
             camera: model.camera.clone(),
-            encodings: model.encodings.iter().map(encoding_to_hex).collect(),
+            disabled: model.disabled,
+            ignore: model.ignore.clone(),
+            encodings: model.encodings.iter()
+                .map(|batch| batch.iter().map(encoding_to_hex).collect())
+                .collect(),
         };
         let json = serde_json::to_string(&disk).unwrap();
         let loaded_disk: FaceModelDisk = serde_json::from_str(&json).unwrap();
-        let loaded_encodings: Vec<[f32; 128]> = loaded_disk
+        let loaded_encodings: Vec<Vec<[f32; 128]>> = loaded_disk
             .encodings
             .into_iter()
-            .map(|s| encoding_from_hex(&s).unwrap())
+            .map(|batch| batch.into_iter().map(|s| encoding_from_hex(&s).unwrap()).collect())
             .collect();
 
-        assert_eq!(loaded_disk.username, "bob");
         assert_eq!(loaded_disk.camera.index, 2);
         assert_eq!(loaded_disk.camera.by_id.as_deref(), Some("usb-046d_Webcam_ABCDEF-video-index0"));
         assert_eq!(loaded_encodings.len(), 1);
-        assert_eq!(loaded_encodings[0], enc);
+        assert_eq!(loaded_encodings[0].len(), 1);
+        assert_eq!(loaded_encodings[0][0], enc);
     }
 
     #[test]
     fn face_model_new_initial_state() {
         let camera = CameraId { by_id: None, by_path: None, index: 3 };
-        let model = FaceModel::new("charlie", camera);
-        assert_eq!(model.version, 1);
-        assert_eq!(model.username, "charlie");
+        let model = FaceModel::new(camera);
+        assert_eq!(model.version, 2);
         assert_eq!(model.camera.index, 3);
         assert!(model.encodings.is_empty());
+        assert!(!model.disabled);
+        assert!(model.ignore.is_empty());
+    }
+
+    /// Old model files without `disabled` / `ignore` must deserialize without error,
+    /// defaulting to `false` and `[]` respectively.
+    #[test]
+    fn load_model_from_json_backward_compat_missing_fields() {
+        let json = r#"{"version":2,"camera":{"by_id":null,"by_path":null,"index":0},"encodings":[]}"#;
+        let model = load_model_from_json(json).unwrap();
+        assert!(!model.disabled);
+        assert!(model.ignore.is_empty());
+    }
+
+    /// `disabled` and `ignore` values survive a JSON round-trip.
+    #[test]
+    fn load_model_from_json_disabled_and_ignore_preserved() {
+        let camera = CameraId { by_id: None, by_path: None, index: 0 };
+        let mut model = FaceModel::new(camera);
+        model.disabled = true;
+        model.ignore = vec!["sudo".to_string(), "login".to_string()];
+
+        let disk = FaceModelDisk {
+            version: model.version,
+            camera: model.camera.clone(),
+            disabled: model.disabled,
+            ignore: model.ignore.clone(),
+            encodings: vec![],
+        };
+        let json = serde_json::to_string(&disk).unwrap();
+        let loaded = load_model_from_json(&json).unwrap();
+
+        assert!(loaded.disabled);
+        assert_eq!(loaded.ignore, vec!["sudo", "login"]);
     }
 
     #[test]
     fn load_model_from_json_roundtrip() {
         let camera = CameraId { by_id: None, by_path: None, index: 0 };
-        let mut model = FaceModel::new("alice", camera);
+        let mut model = FaceModel::new(camera);
         let enc = [0.25f32; 128];
-        model.add_encoding(enc);
+        model.add_batch(vec![enc]);
 
         let disk = FaceModelDisk {
             version: model.version,
-            username: model.username.clone(),
             camera: model.camera.clone(),
-            encodings: model.encodings.iter().map(encoding_to_hex).collect(),
+            disabled: model.disabled,
+            ignore: model.ignore.clone(),
+            encodings: model.encodings.iter()
+                .map(|batch| batch.iter().map(encoding_to_hex).collect())
+                .collect(),
         };
         let json = serde_json::to_string(&disk).unwrap();
 
         let loaded = load_model_from_json(&json).unwrap();
-        assert_eq!(loaded.username, "alice");
-        assert_eq!(loaded.version, 1);
+        assert_eq!(loaded.version, 2);
         assert_eq!(loaded.encodings.len(), 1);
-        assert_eq!(loaded.encodings[0], enc);
+        assert_eq!(loaded.encodings[0].len(), 1);
+        assert_eq!(loaded.encodings[0][0], enc);
     }
 
     #[test]
@@ -347,7 +399,7 @@ mod tests {
     #[test]
     fn load_model_from_json_bad_encoding_hex() {
         // Valid JSON structure but the encoding string is the wrong length.
-        let json = r#"{"version":1,"username":"x","camera":{"by_id":null,"by_path":null,"index":0},"encodings":["tooshort"]}"#;
+        let json = r#"{"version":2,"username":"x","camera":{"by_id":null,"by_path":null,"index":0},"encodings":[["tooshort"]]}"#;
         let err = load_model_from_json(json).unwrap_err();
         assert!(matches!(err, FaceAuthError::Dlib(_)));
     }

@@ -2,7 +2,7 @@ use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
-use faceauth_core::{authenticate_face_with_model, camera_name_for_index, error::FaceAuthError, load_model_via_daemon, AuthConfig};
+use faceauth_core::{authenticate_via_daemon, camera_name_for_index, error::FaceAuthError, load_model_via_daemon};
 use pamsm::{Pam, PamError, PamFlags, PamLibExt, PamMsgStyle, PamServiceModule, LogLvl};
 
 struct FaceAuthPam;
@@ -97,10 +97,10 @@ fn notify_start(uid: u32, gid: u32, service: &str, caller: &str) -> Option<u32> 
 
 /// Spawn faceauth-notify to replace the in-progress notification with the result.
 /// Fire-and-forget: the child is not waited on.
-fn notify_result(uid: u32, gid: u32, notif_id: u32, success: bool, reason: &str) {
+fn notify_result(uid: u32, gid: u32, notif_id: u32, success: bool, service: &str, caller: &str) {
     let subcommand = if success { "success" } else { "failure" };
     let mut cmd = Command::new(concat!(env!("FACEAUTH_LIBEXEC_DIR"), "/faceauth-notify"));
-    cmd.args([subcommand, &uid.to_string(), &notif_id.to_string(), reason])
+    cmd.args([subcommand, &uid.to_string(), &notif_id.to_string(), service, caller])
         .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path=/run/user/{uid}/bus"))
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -184,6 +184,18 @@ fn do_authenticate(pamh: &Pam) -> PamError {
         }
     };
 
+    if face_model.disabled {
+        let _ = pamh.syslog(LogLvl::NOTICE, &format!("[{caller}] face authentication disabled for {user_desc}, skipping"));
+        return PamError::AUTHINFO_UNAVAIL;
+    }
+
+    let is_ignored = face_model.ignore.iter()
+        .any(|s| s == &service || Some(s.as_str()) == parent.as_deref());
+    if is_ignored {
+        let _ = pamh.syslog(LogLvl::NOTICE, &format!("[{caller}] face authentication ignored for {user_desc} (requestor in ignore list), skipping"));
+        return PamError::AUTHINFO_UNAVAIL;
+    }
+
     let camera_index = face_model.camera.index;
     let camera_desc = match &face_model.camera.by_id {
         Some(id) => format!("/dev/video{camera_index} ({id})"),
@@ -211,20 +223,22 @@ fn do_authenticate(pamh: &Pam) -> PamError {
         _ => None,
     };
 
-    // The camera index is stored in the model from enrollment time; no config needed.
-    let result = authenticate_face_with_model(face_model, &AuthConfig::default());
+    // Delegate authentication to the daemon: it owns the encoder and camera.
+    let result = authenticate_via_daemon(username, 5);
 
     // Replace the in-progress notification with the outcome.
     if let (Some(u), Some(g), Some(id)) = (uid, gid, notif_id) {
+        let caller_str = parent.as_deref().unwrap_or("");
         match &result {
-            Ok(())  => notify_result(u, g, id, true,  ""),
-            Err(e)  => notify_result(u, g, id, false, &e.to_string()),
+            Ok(())  => notify_result(u, g, id, true,  &service, caller_str),
+            Err(_)  => notify_result(u, g, id, false, &service, caller_str),
         }
     }
 
     match result {
         Ok(()) => {
             let _ = pamh.syslog(LogLvl::NOTICE, &format!("[{caller}] face authentication succeeded for {user_desc} using {camera_desc}"));
+            let _ = pamh.conv(Some("faceauth: authentication successful"), PamMsgStyle::TEXT_INFO);
             PamError::SUCCESS
         }
 
@@ -232,6 +246,7 @@ fn do_authenticate(pamh: &Pam) -> PamError {
         // to the next PAM module (e.g. pam_unix for password prompt).
         Err(e) => {
             let _ = pamh.syslog(LogLvl::NOTICE, &format!("[{caller}] face authentication failed for {user_desc} using {camera_desc}, skipping: {e}"));
+            let _ = pamh.conv(Some(&format!("faceauth: authentication failed: {e}")), PamMsgStyle::ERROR_MSG);
             PamError::AUTHINFO_UNAVAIL
         }
     }

@@ -65,9 +65,19 @@ fi
 
 if ! id -u faceauthd &>/dev/null; then
     echo "==> Creating faceauthd system user..."
-    sudo useradd --system --no-create-home --shell "$NOLOGIN_SHELL" faceauthd
+    sudo useradd --system --no-create-home --shell "$NOLOGIN_SHELL" \
+        --groups video faceauthd
 else
     echo "==> faceauthd user already exists, skipping."
+fi
+
+# Ensure faceauthd is in the video group so the daemon can open /dev/video*
+# (owned root:video, mode 0660). Run on every install to fix existing setups.
+if getent group video &>/dev/null; then
+    if ! id -nG faceauthd 2>/dev/null | grep -qw video; then
+        echo "==> Adding faceauthd to the video group..."
+        sudo usermod -aG video faceauthd
+    fi
 fi
 
 # ---------------------------------------------------------------------------

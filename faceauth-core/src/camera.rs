@@ -247,14 +247,22 @@ fn resolve_camera_index(id: &CameraId) -> u32 {
         file_name.strip_prefix("video")?.parse().ok()
     };
 
-    if let Some(name) = &id.by_id {
-        if let Some(idx) = resolve(Path::new("/dev/v4l/by-id/"), name) {
+    // Try by_path first: it encodes both the USB port and the interface number
+    // within the device, making it the most specific identifier for cameras
+    // that expose multiple V4L2 interfaces (e.g. RGB + IR streams). by_id only
+    // encodes the device serial, so its video-index suffix can resolve to a
+    // different /dev/videoN after a reboot if the kernel assigns indices
+    // differently.
+    if let Some(name) = &id.by_path {
+        if let Some(idx) = resolve(Path::new("/dev/v4l/by-path/"), name) {
             return idx;
         }
     }
 
-    if let Some(name) = &id.by_path {
-        if let Some(idx) = resolve(Path::new("/dev/v4l/by-path/"), name) {
+    // Fall back to by_id: stable across USB port changes, but ambiguous for
+    // multi-interface devices.
+    if let Some(name) = &id.by_id {
+        if let Some(idx) = resolve(Path::new("/dev/v4l/by-id/"), name) {
             return idx;
         }
     }

@@ -7,8 +7,7 @@ use clap::{Parser, Subcommand};
 use faceauth_core::ipc::{Request, Response, SOCKET_PATH};
 use faceauth_core::model::FaceModel;
 use faceauth_core::{
-    authenticate_face_with_model, camera_name_for_index, capture_face_encoding, encoding_distance,
-    load_model_from_json, username_for_uid, AuthConfig,
+    camera_name_for_index, encoding_distance, load_model_from_json, username_for_uid,
 };
 use gettextrs::gettext;
 
@@ -35,12 +34,11 @@ struct Cli {
 enum Commands {
     /// Enroll a face model for a user.
     ///
-    /// Captures a face encoding from the camera locally and sends it to the
-    /// faceauth daemon for storage. Falls back to direct file write if the
-    /// daemon socket is not available (requires root).
+    /// Asks the faceauth daemon to capture a face encoding from the camera,
+    /// then sends it to the daemon for storage. Requires the daemon to be running.
     ///
-    /// Encodings are appended to any already stored. Use `set` to replace
-    /// all existing encodings in one operation.
+    /// Encodings are appended to any already stored. Use `clear --index N` to
+    /// remove a specific batch, or `clear` to remove all stored batches.
     Add {
         /// Seconds to wait for a single-face frame before giving up.
         #[arg(short, long, default_value_t = 30)]
@@ -52,34 +50,6 @@ enum Commands {
         /// omit to be prompted interactively. `cameras` shows available options.
         #[arg(short, long)]
         camera: Option<String>,
-
-        /// Number of encodings to capture. Multiple encodings from different
-        /// angles or lighting conditions improve recognition accuracy.
-        #[arg(short, long, default_value_t = 5)]
-        count: u32,
-    },
-
-    /// Replace all stored encodings with a fresh set.
-    ///
-    /// Identical to `add` except that all previously stored encodings are
-    /// removed just before the first new encoding is saved. If capture fails
-    /// mid-way the old encodings are already gone, so prefer `add` when you
-    /// want to keep existing encodings as a fallback.
-    Set {
-        /// Seconds to wait for a single-face frame before giving up.
-        #[arg(short, long, default_value_t = 30)]
-        timeout: u64,
-
-        /// Camera to use. Accepts a device index (e.g. 2), a full device path
-        /// (/dev/video2), or a stable udev name from /dev/v4l/by-id/ or
-        /// /dev/v4l/by-path/. Required in non-interactive mode (e.g. scripts);
-        /// omit to be prompted interactively. `cameras` shows available options.
-        #[arg(short, long)]
-        camera: Option<String>,
-
-        /// Number of encodings to capture.
-        #[arg(short, long, default_value_t = 5)]
-        count: u32,
     },
 
     /// Test face authentication for a user.
@@ -94,24 +64,55 @@ enum Commands {
 
     /// Remove all stored face encodings for a user.
     ///
-    /// Sends a clear request to the faceauth daemon. Falls back to direct
-    /// file removal if the daemon socket is not available (requires root).
-    Clear,
+    /// Without `--index`, removes the entire face model. With `--index N`,
+    /// removes only enrollment batch N (0-based); run `faceauth info` to see
+    /// how many batches are enrolled.
+    Clear {
+        /// Remove only this enrollment batch (0-based index) instead of all batches.
+        #[arg(short, long)]
+        index: Option<usize>,
+    },
 
     /// Show information about a user's stored face model.
-    ///
-    /// Prints the number of enrolled encodings, the camera index, and
-    /// pairwise Euclidean distances between encodings (threshold is 0.6).
     Info,
 
     /// List available camera devices and their suitability for face authentication.
     Cameras,
+
+    /// Disable face authentication for a user.
+    ///
+    /// When disabled, the PAM module skips face auth and falls through to the
+    /// next configured module (e.g. password). Use `enable` to re-enable.
+    Disable,
+
+    /// Re-enable face authentication for a user.
+    Enable,
+
+    /// Add an application to the per-user ignore list.
+    ///
+    /// Face authentication is silently skipped when the requesting PAM service
+    /// or parent process matches an entry in the ignore list.
+    Ignore {
+        /// PAM service name or parent process name to ignore (e.g. "sudo").
+        requestor: String,
+    },
+
+    /// Remove an application from the per-user ignore list.
+    Unignore {
+        /// PAM service name or parent process name to remove.
+        requestor: String,
+    },
 }
 
 /// Send a request to the daemon and return the response.
 /// Returns `None` if the daemon socket is not available.
 fn daemon_request(req: &Request) -> Option<Response> {
     let stream = UnixStream::connect(SOCKET_PATH).ok()?;
+    // Set a generous read timeout so long-running requests (e.g. Authenticate)
+    // don't block forever if the daemon hangs or the client is killed.
+    stream
+        .set_read_timeout(Some(Duration::from_secs(120)))
+        .ok()?;
     let mut json = serde_json::to_string(req).ok()?;
     json.push('\n');
     (&stream).write_all(json.as_bytes()).ok()?;
@@ -120,6 +121,14 @@ fn daemon_request(req: &Request) -> Option<Response> {
     let mut line = String::new();
     reader.read_line(&mut line).ok()?;
     serde_json::from_str(line.trim()).ok()
+}
+
+/// Return true if the error string means the user has no enrolled model.
+///
+/// Two distinct messages are possible: the daemon's own "no model enrolled for"
+/// and `FaceAuthError::ModelNotFound`'s display when the direct-disk fallback is used.
+fn is_model_not_found(e: &str) -> bool {
+    e.contains("no model enrolled") || e.contains("No face model found")
 }
 
 /// Fetch a user's model via the daemon.
@@ -159,15 +168,12 @@ fn notify_start(uid: u32) -> Option<u32> {
 }
 
 /// Send a result notification via faceauth-notify; fire-and-forget.
-fn notify_result(uid: u32, notif_id: u32, success: bool, reason: &str) {
+fn notify_result(uid: u32, notif_id: u32, success: bool) {
     let sub = if success { "success" } else { "failure" };
     let mut cmd = process::Command::new(concat!(env!("FACEAUTH_LIBEXEC_DIR"), "/faceauth-notify"));
-    cmd.args([sub, &uid.to_string(), &notif_id.to_string()])
+    cmd.args([sub, &uid.to_string(), &notif_id.to_string(), "faceauth"])
         .stdout(process::Stdio::null())
         .stderr(process::Stdio::null());
-    if !success {
-        cmd.arg(reason);
-    }
     let _ = cmd.spawn();
 }
 
@@ -194,45 +200,41 @@ fn main() {
         }
     };
 
-    let is_set = matches!(cli.command, Commands::Set { .. });
-
     match cli.command {
-        Commands::Add {
-            timeout,
-            camera,
-            count,
-        }
-        | Commands::Set {
-            timeout,
-            camera,
-            count,
-        } => {
-            if count == 0 || count > 20 {
-                eprintln!("faceauth: {}", gettext("--count must be between 1 and 20"));
-                process::exit(1);
-            }
-            let camera_index = camera::resolve_add_camera(camera);
+        Commands::Add { timeout, camera } => {
+            const COUNT: u32 = 5;
 
-            if is_set {
-                eprintln!(
-                    "{}",
-                    gettext("faceauth: replacing face model for '{user}' ({count} encodings)")
-                        .replace("{user}", &username)
-                        .replace("{count}", &count.to_string())
-                );
-            } else {
-                eprintln!(
-                    "{}",
-                    gettext("faceauth: enrolling face for '{user}' ({count} encodings)")
-                        .replace("{user}", &username)
-                        .replace("{count}", &count.to_string())
-                );
-            }
+            // If a model already exists, its stored camera is authoritative.
+            // A --camera argument is validated against it; if absent, the stored
+            // camera is used directly (no interactive prompt on subsequent adds).
+            let camera_index = match load_model(&username) {
+                Ok(existing) => {
+                    let stored = existing.camera.index;
+                    if let Some(cam_arg) = camera {
+                        let given = camera::resolve_add_camera(Some(cam_arg));
+                        if given != stored {
+                            eprintln!(
+                                "faceauth: {}",
+                                gettext("'{user}' is already enrolled with /dev/video{camera}; omit --camera to add another batch, or run 'faceauth clear' first to change cameras")
+                                    .replace("{user}", &username)
+                                    .replace("{camera}", &stored.to_string())
+                            );
+                            process::exit(1);
+                        }
+                    }
+                    stored
+                }
+                Err(ref e) if is_model_not_found(e) => camera::resolve_add_camera(camera),
+                Err(e) => {
+                    eprintln!("faceauth: {}", e);
+                    process::exit(1);
+                }
+            };
 
-            // For `set`: clear existing encodings just before saving the first
-            // new one. We defer the clear until after all captures succeed so
-            // that if capture fails the old model is still intact.
-            let mut cleared = false;
+            eprintln!(
+                "faceauth: {}",
+                gettext("enrolling face for '{user}'").replace("{user}", &username)
+            );
 
             // Encodings captured so far this session, used to reject poses
             // that are too similar to one already captured (distance < 0.3).
@@ -251,11 +253,11 @@ fn main() {
             };
             let status_done = |msg: &str| {
                 let mut h = stderr.lock();
-                let _ = writeln!(h, "\r  {:<72}", msg);
+                let _ = writeln!(h, "\rfaceauth: {:<72}", msg);
             };
 
-            while i < count {
-                if count == 1 {
+            while i < COUNT {
+                if COUNT == 1 {
                     status(&gettext("look directly at the camera..."));
                 } else {
                     let hint = if i == 0 {
@@ -266,25 +268,47 @@ fn main() {
                     status(
                         &gettext("[{done}/{total}] capturing...{hint}")
                             .replace("{done}", &(i + 1).to_string())
-                            .replace("{total}", &count.to_string())
+                            .replace("{total}", &COUNT.to_string())
                             .replace("{hint}", &hint),
                     );
                 }
 
-                let (encoding, _camera_id) =
-                    match capture_face_encoding(Duration::from_secs(timeout), camera_index) {
-                        Ok(r) => r,
-                        Err(e) => {
+                let encoding: [f32; 128] = {
+                    let req = Request::CaptureEncoding {
+                        camera_index,
+                        timeout_secs: timeout,
+                    };
+                    match daemon_request(&req) {
+                        Some(Response::Encoding { data }) => match data.try_into() {
+                            Ok(arr) => arr,
+                            Err(_) => {
+                                status_done(&gettext(
+                                    "capture failed: invalid encoding from daemon",
+                                ));
+                                process::exit(1);
+                            }
+                        },
+                        Some(Response::Err { message }) => {
                             status_done(
-                                &gettext("capture failed: {error}")
-                                    .replace("{error}", &e.to_string()),
+                                &gettext("capture failed: {error}").replace("{error}", &message),
                             );
                             process::exit(1);
                         }
-                    };
+                        Some(_) => {
+                            status_done(&gettext(
+                                "capture failed: unexpected response from daemon",
+                            ));
+                            process::exit(1);
+                        }
+                        None => {
+                            status_done("daemon not available; cannot capture without daemon");
+                            process::exit(1);
+                        }
+                    }
+                };
 
                 // Reject if too similar to any encoding already captured this session.
-                if count > 1 {
+                if COUNT > 1 {
                     if let Some(min_dist) = captured
                         .iter()
                         .map(|prev| encoding_distance(prev, &encoding))
@@ -295,112 +319,82 @@ fn main() {
                                 "[{done}/{total}] too similar ({dist}) - adjust angle and hold still"
                             )
                             .replace("{done}", &(i + 1).to_string())
-                            .replace("{total}", &count.to_string())
+                            .replace("{total}", &COUNT.to_string())
                             .replace("{dist}", &format!("{:.2}", min_dist)));
                             continue;
                         }
                     }
                 }
 
-                // `set`: clear existing encodings on the first save, after all
-                // captures for this batch have succeeded.
-                if is_set && !cleared {
-                    let clear_req = Request::Clear {
-                        username: username.clone(),
-                    };
-                    match daemon_request(&clear_req) {
-                        Some(Response::Ok) | None => {}
-                        Some(Response::Err { message }) => {
-                            // A missing model is fine; any other error is fatal.
-                            if !message.contains("no model") {
-                                status_done(
-                                    &gettext("clear failed: {error}").replace("{error}", &message),
-                                );
-                                process::exit(1);
-                            }
-                        }
-                        Some(_) => {
-                            status_done(&gettext("unexpected response from daemon during clear"));
-                            process::exit(1);
-                        }
-                    }
-                    cleared = true;
-                }
-
-                let req = Request::Enroll {
-                    username: username.clone(),
-                    camera_index,
-                    encoding: encoding.to_vec(),
-                };
-
-                let enroll_ok = match daemon_request(&req) {
-                    Some(Response::Ok) => true,
-                    Some(Response::Err { message }) => {
-                        status_done(
-                            &gettext("enrollment failed: {error}").replace("{error}", &message),
-                        );
-                        process::exit(1);
-                    }
-                    Some(_) => {
-                        status_done(&gettext("unexpected response from daemon"));
-                        process::exit(1);
-                    }
-                    None => {
-                        // Daemon not running — fall back to direct write (requires root).
-                        status_done(&format!(
-                            "daemon not available ({}); attempting direct write (requires root)",
-                            SOCKET_PATH
-                        ));
-                        match faceauth_core::enroll_face(
-                            &username,
-                            Duration::from_secs(timeout),
-                            camera_index,
-                        ) {
-                            Ok(()) => true,
-                            Err(e) => {
-                                status_done(
-                                    &gettext("enrollment failed: {error}")
-                                        .replace("{error}", &e.to_string()),
-                                );
-                                process::exit(1);
-                            }
-                        }
-                    }
-                };
-
-                if enroll_ok {
-                    captured.push(encoding);
-                    i += 1;
-                    let captured_msg = gettext("[{done}/{total}] captured")
-                        .replace("{done}", &i.to_string())
-                        .replace("{total}", &count.to_string());
-                    // Only commit the line permanently on the last encoding.
-                    if i == count {
-                        status_done(&captured_msg);
-                    } else {
-                        status(&captured_msg);
-                    }
+                captured.push(encoding);
+                i += 1;
+                let captured_msg = gettext("[{done}/{total}] captured")
+                    .replace("{done}", &i.to_string())
+                    .replace("{total}", &COUNT.to_string());
+                // Only commit the line permanently on the last encoding.
+                if i == COUNT {
+                    status_done(&captured_msg);
+                } else {
+                    status(&captured_msg);
                 }
             }
 
-            if is_set {
-                println!(
-                    "{}",
-                    gettext("Face model replaced for '{user}'.").replace("{user}", &username)
-                );
-            } else {
-                println!(
-                    "{}",
-                    gettext("Enrollment successful for '{user}'.").replace("{user}", &username)
-                );
+            // Enroll the entire batch in one request.
+            let req = Request::Enroll {
+                username: username.clone(),
+                camera_index,
+                encodings: captured.iter().map(|enc| enc.to_vec()).collect(),
+            };
+            match daemon_request(&req) {
+                Some(Response::Ok) => {}
+                Some(Response::Err { message }) => {
+                    eprintln!(
+                        "faceauth: {}",
+                        gettext("enrollment failed: {error}").replace("{error}", &message)
+                    );
+                    process::exit(1);
+                }
+                Some(_) => {
+                    eprintln!("faceauth: {}", gettext("unexpected response from daemon"));
+                    process::exit(1);
+                }
+                None => {
+                    eprintln!("faceauth: daemon not available");
+                    process::exit(1);
+                }
             }
+
+            println!(
+                "faceauth: {}",
+                gettext("Enrollment successful for '{user}'.").replace("{user}", &username)
+            );
         }
 
         Commands::Test { timeout } => {
-            let face_model = match load_model(&username) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("faceauth: {}", e);
+            // Load model via daemon to get camera info for the user-facing message.
+            // Authentication also requires the daemon, so if it is unavailable we
+            // fail immediately rather than falling back to a direct disk read (which
+            // would produce a misleading "Permission denied" error).
+            let face_model = match daemon_request(&Request::LoadModel {
+                username: username.clone(),
+            }) {
+                Some(Response::Model { json }) => match load_model_from_json(&json) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!("faceauth: {}", e);
+                        process::exit(1);
+                    }
+                },
+                Some(Response::Err { message }) => {
+                    eprintln!("faceauth: {}", message);
+                    process::exit(1);
+                }
+                Some(_) => {
+                    eprintln!("faceauth: {}", gettext("unexpected response from daemon"));
+                    process::exit(1);
+                }
+                None => {
+                    eprintln!("faceauth: daemon not available");
                     process::exit(1);
                 }
             };
@@ -413,8 +407,8 @@ fn main() {
                 format!("{camera_name} at /dev/video{camera_index}")
             };
             eprintln!(
-                "{}",
-                gettext("faceauth: '{user}' please look at the camera ({camera}) ...")
+                "faceauth: {}",
+                gettext("'{user}' please look at the camera ({camera}) ...")
                     .replace("{user}", &username)
                     .replace("{camera}", &camera_display)
             );
@@ -422,53 +416,27 @@ fn main() {
             let uid = unsafe { libc::getuid() };
             let notif_id = notify_start(uid);
 
-            let config = AuthConfig {
-                timeout: Duration::from_secs(timeout),
-                ..Default::default()
-            };
-
-            match authenticate_face_with_model(face_model, &config) {
-                Ok(()) => {
-                    if let Some(id) = notif_id {
-                        notify_result(uid, id, true, "");
-                    }
-                    println!(
-                        "{}",
-                        gettext("Authentication successful for '{user}'.")
-                            .replace("{user}", &username)
-                    );
-                    process::exit(0);
-                }
-                Err(e) => {
-                    if let Some(id) = notif_id {
-                        notify_result(uid, id, false, &e.to_string());
-                    }
-                    eprintln!(
-                        "{}",
-                        gettext("faceauth: authentication failed: {error}")
-                            .replace("{error}", &e.to_string())
-                    );
-                    process::exit(1);
-                }
-            }
-        }
-
-        Commands::Clear => {
-            let req = Request::Clear {
+            let req = Request::Authenticate {
                 username: username.clone(),
+                timeout_secs: timeout,
             };
 
             match daemon_request(&req) {
                 Some(Response::Ok) => {
-                    println!(
-                        "{}",
-                        gettext("Model for '{user}' removed.").replace("{user}", &username)
-                    );
+                    if let Some(id) = notif_id {
+                        notify_result(uid, id, true);
+                    }
+                    println!("faceauth: {}", gettext("authentication successful"));
+                    process::exit(0);
                 }
                 Some(Response::Err { message }) => {
+                    if let Some(id) = notif_id {
+                        notify_result(uid, id, false);
+                    }
                     eprintln!(
-                        "{}",
-                        gettext("faceauth: clear failed: {error}").replace("{error}", &message)
+                        "faceauth: {}",
+                        gettext("authentication failed: {error}")
+                            .replace("{error}", &message)
                     );
                     process::exit(1);
                 }
@@ -477,48 +445,39 @@ fn main() {
                     process::exit(1);
                 }
                 None => {
-                    // Daemon not running — fall back to direct removal (requires root).
-                    eprintln!(
-                        "faceauth: daemon not available ({}); \
-                         attempting direct removal (requires root)",
-                        SOCKET_PATH
+                    eprintln!("faceauth: daemon not available");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Clear { index } => {
+            let req = Request::Clear {
+                username: username.clone(),
+                index,
+            };
+
+            match daemon_request(&req) {
+                Some(Response::Ok) => {
+                    println!(
+                        "faceauth: {}",
+                        gettext("Model for '{user}' removed.").replace("{user}", &username)
                     );
-                    let uid = match faceauth_core::uid_for_username(&username) {
-                        Some(u) => u,
-                        None => {
-                            eprintln!(
-                                "{}",
-                                gettext("faceauth: no system account for '{user}'")
-                                    .replace("{user}", &username)
-                            );
-                            process::exit(1);
-                        }
-                    };
-                    let path = faceauth_core::model::model_path(uid);
-
-                    if !path.exists() {
-                        eprintln!(
-                            "{}",
-                            gettext("faceauth: no model found for '{user}'; nothing to remove")
-                                .replace("{user}", &username)
-                        );
-                        process::exit(0);
-                    }
-
-                    match std::fs::remove_file(&path) {
-                        Ok(()) => println!(
-                            "{}",
-                            gettext("Model for '{user}' removed.").replace("{user}", &username)
-                        ),
-                        Err(e) => {
-                            eprintln!(
-                                "{}",
-                                gettext("faceauth: failed to remove model: {error}")
-                                    .replace("{error}", &e.to_string())
-                            );
-                            process::exit(1);
-                        }
-                    }
+                }
+                Some(Response::Err { message }) => {
+                    eprintln!(
+                        "faceauth: {}",
+                        gettext("clear failed: {error}").replace("{error}", &message)
+                    );
+                    process::exit(1);
+                }
+                Some(_) => {
+                    eprintln!("faceauth: {}", gettext("unexpected response from daemon"));
+                    process::exit(1);
+                }
+                None => {
+                    eprintln!("faceauth: daemon not available");
+                    process::exit(1);
                 }
             }
         }
@@ -532,8 +491,8 @@ fn main() {
                 }
             };
 
-            println!("{}: {}", gettext("User"), model.username);
-            if let Some(uid) = faceauth_core::uid_for_username(&model.username) {
+            println!("{}: {}", gettext("User"), username);
+            if let Some(uid) = faceauth_core::uid_for_username(&username) {
                 println!("{}: {}", gettext("UID"), uid);
             }
             println!(
@@ -548,12 +507,18 @@ fn main() {
             if let Some(ref by_path) = model.camera.by_path {
                 println!("{}: {}", gettext("Camera by-path"), by_path);
             }
-            println!("{}: {}", gettext("Encodings"), model.encodings.len());
-
-            for (i, enc) in model.encodings.iter().enumerate() {
-                let norm: f32 = enc.iter().map(|x| x * x).sum::<f32>().sqrt();
-                println!("  enc[{}]: norm = {:.4}", i, norm);
-            }
+            println!("{}: {}", gettext("Batches"), model.encodings.len());
+            println!(
+                "{}: {}",
+                gettext("Disabled"),
+                if model.disabled { gettext("yes") } else { gettext("no") }
+            );
+            let ignore_display = if model.ignore.is_empty() {
+                gettext("(none)")
+            } else {
+                model.ignore.join(", ")
+            };
+            println!("{}: {}", gettext("Ignore list"), ignore_display);
         }
 
         Commands::Cameras => {
@@ -561,6 +526,128 @@ fn main() {
             if cameras.is_empty() {
                 eprintln!("faceauth: {}", gettext("no camera devices found"));
                 process::exit(1);
+            }
+        }
+
+        Commands::Disable => {
+            let req = Request::SetConfig {
+                username: username.clone(),
+                disabled: Some(true),
+                ignore_add: None,
+                ignore_remove: None,
+            };
+            match daemon_request(&req) {
+                Some(Response::Ok) => {
+                    println!(
+                        "faceauth: {}",
+                        gettext("face authentication disabled for '{user}'.")
+                            .replace("{user}", &username)
+                    );
+                }
+                Some(Response::Err { message }) => {
+                    eprintln!("faceauth: {}", message);
+                    process::exit(1);
+                }
+                Some(_) => {
+                    eprintln!("faceauth: {}", gettext("unexpected response from daemon"));
+                    process::exit(1);
+                }
+                None => {
+                    eprintln!("faceauth: daemon not available");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Enable => {
+            let req = Request::SetConfig {
+                username: username.clone(),
+                disabled: Some(false),
+                ignore_add: None,
+                ignore_remove: None,
+            };
+            match daemon_request(&req) {
+                Some(Response::Ok) => {
+                    println!(
+                        "faceauth: {}",
+                        gettext("face authentication enabled for '{user}'.")
+                            .replace("{user}", &username)
+                    );
+                }
+                Some(Response::Err { message }) => {
+                    eprintln!("faceauth: {}", message);
+                    process::exit(1);
+                }
+                Some(_) => {
+                    eprintln!("faceauth: {}", gettext("unexpected response from daemon"));
+                    process::exit(1);
+                }
+                None => {
+                    eprintln!("faceauth: daemon not available");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Ignore { requestor } => {
+            let req = Request::SetConfig {
+                username: username.clone(),
+                disabled: None,
+                ignore_add: Some(requestor.clone()),
+                ignore_remove: None,
+            };
+            match daemon_request(&req) {
+                Some(Response::Ok) => {
+                    println!(
+                        "faceauth: {}",
+                        gettext("'{requestor}' added to ignore list for '{user}'.")
+                            .replace("{requestor}", &requestor)
+                            .replace("{user}", &username)
+                    );
+                }
+                Some(Response::Err { message }) => {
+                    eprintln!("faceauth: {}", message);
+                    process::exit(1);
+                }
+                Some(_) => {
+                    eprintln!("faceauth: {}", gettext("unexpected response from daemon"));
+                    process::exit(1);
+                }
+                None => {
+                    eprintln!("faceauth: daemon not available");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Unignore { requestor } => {
+            let req = Request::SetConfig {
+                username: username.clone(),
+                disabled: None,
+                ignore_add: None,
+                ignore_remove: Some(requestor.clone()),
+            };
+            match daemon_request(&req) {
+                Some(Response::Ok) => {
+                    println!(
+                        "faceauth: {}",
+                        gettext("'{requestor}' removed from ignore list for '{user}'.")
+                            .replace("{requestor}", &requestor)
+                            .replace("{user}", &username)
+                    );
+                }
+                Some(Response::Err { message }) => {
+                    eprintln!("faceauth: {}", message);
+                    process::exit(1);
+                }
+                Some(_) => {
+                    eprintln!("faceauth: {}", gettext("unexpected response from daemon"));
+                    process::exit(1);
+                }
+                None => {
+                    eprintln!("faceauth: daemon not available");
+                    process::exit(1);
+                }
             }
         }
     }

@@ -7,7 +7,7 @@ msgstr ""
 "Project-Id-Version: faceauth 0.1.0\n"
 "Report-Msgid-Bugs-To: https://github.com/gvarsanyi/faceauth/issues\n"
 "PO-Revision-Date: 2024-01-01 00:00+0000\n"
-"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Last-Translator: faceauth contributors <https://github.com/gvarsanyi/faceauth/issues>\n"
 "Language-Team: German\n"
 "Language: de\n"
 "MIME-Version: 1.0\n"
@@ -20,16 +20,12 @@ msgid "cannot determine username for current UID"
 msgstr "Benutzername für aktuelle UID konnte nicht ermittelt werden"
 
 #: faceauth-cli/src/main.rs
-msgid "--count must be between 1 and 20"
-msgstr "--count muss zwischen 1 und 20 liegen"
+msgid "'{user}' is already enrolled with /dev/video{camera}; omit --camera to add another batch, or run 'faceauth clear' first to change cameras"
+msgstr "'{user}' ist bereits mit /dev/video{camera} registriert; lassen Sie --camera weg, um einen weiteren Batch hinzuzufügen, oder führen Sie zuerst 'faceauth clear' aus, um die Kamera zu wechseln"
 
 #: faceauth-cli/src/main.rs
-msgid "faceauth: replacing face model for '{user}' ({count} encodings)"
-msgstr "faceauth: Gesichtsmodell für '{user}' wird ersetzt ({count} Aufnahmen)"
-
-#: faceauth-cli/src/main.rs
-msgid "faceauth: enrolling face for '{user}' ({count} encodings)"
-msgstr "faceauth: Gesicht für '{user}' wird registriert ({count} Aufnahmen)"
+msgid "enrolling face for '{user}'"
+msgstr "Gesicht für '{user}' wird registriert"
 
 #: faceauth-cli/src/main.rs
 msgid "look directly at the camera..."
@@ -52,14 +48,6 @@ msgid "[{done}/{total}] too similar ({dist}) - adjust angle and hold still"
 msgstr "[{done}/{total}] zu ähnlich ({dist}) - Winkel anpassen und ruhig halten"
 
 #: faceauth-cli/src/main.rs
-msgid "clear failed: {error}"
-msgstr "Löschen fehlgeschlagen: {error}"
-
-#: faceauth-cli/src/main.rs
-msgid "unexpected response from daemon during clear"
-msgstr "Unerwartete Antwort vom Daemon beim Löschen"
-
-#: faceauth-cli/src/main.rs
 msgid "enrollment failed: {error}"
 msgstr "Registrierung fehlgeschlagen: {error}"
 
@@ -72,44 +60,28 @@ msgid "[{done}/{total}] captured"
 msgstr "[{done}/{total}] aufgenommen"
 
 #: faceauth-cli/src/main.rs
-msgid "Face model replaced for '{user}'."
-msgstr "Gesichtsmodell für '{user}' wurde ersetzt."
-
-#: faceauth-cli/src/main.rs
 msgid "Enrollment successful for '{user}'."
 msgstr "Registrierung für '{user}' erfolgreich."
 
 #: faceauth-cli/src/main.rs
-msgid "faceauth: '{user}' please look at the camera ({camera}) ..."
-msgstr "faceauth: '{user}' bitte in die Kamera schauen ({camera}) ..."
+msgid "'{user}' please look at the camera ({camera}) ..."
+msgstr "'{user}' bitte in die Kamera schauen ({camera}) ..."
 
 #: faceauth-cli/src/main.rs
-msgid "Authentication successful for '{user}'."
-msgstr "Authentifizierung für '{user}' erfolgreich."
+msgid "authentication successful"
+msgstr "Authentifizierung erfolgreich"
 
 #: faceauth-cli/src/main.rs
-msgid "faceauth: authentication failed: {error}"
-msgstr "faceauth: Authentifizierung fehlgeschlagen: {error}"
+msgid "authentication failed: {error}"
+msgstr "Authentifizierung fehlgeschlagen: {error}"
 
 #: faceauth-cli/src/main.rs
 msgid "Model for '{user}' removed."
 msgstr "Modell für '{user}' wurde entfernt."
 
 #: faceauth-cli/src/main.rs
-msgid "faceauth: clear failed: {error}"
-msgstr "faceauth: Löschen fehlgeschlagen: {error}"
-
-#: faceauth-cli/src/main.rs
-msgid "faceauth: no system account for '{user}'"
-msgstr "faceauth: Kein Systemkonto für '{user}'"
-
-#: faceauth-cli/src/main.rs
-msgid "faceauth: no model found for '{user}'; nothing to remove"
-msgstr "faceauth: Kein Modell für '{user}' gefunden; nichts zu entfernen"
-
-#: faceauth-cli/src/main.rs
-msgid "faceauth: failed to remove model: {error}"
-msgstr "faceauth: Modell konnte nicht entfernt werden: {error}"
+msgid "clear failed: {error}"
+msgstr "Löschen fehlgeschlagen: {error}"
 
 #: faceauth-cli/src/main.rs
 msgid "User"
@@ -132,8 +104,44 @@ msgid "Camera by-path"
 msgstr "Kamera nach Pfad"
 
 #: faceauth-cli/src/main.rs
-msgid "Encodings"
-msgstr "Aufnahmen"
+msgid "Batches"
+msgstr "Batches"
+
+#: faceauth-cli/src/main.rs
+msgid "Disabled"
+msgstr "Deaktiviert"
+
+#: faceauth-cli/src/main.rs
+msgid "yes"
+msgstr "ja"
+
+#: faceauth-cli/src/main.rs
+msgid "no"
+msgstr "nein"
+
+#: faceauth-cli/src/main.rs
+msgid "Ignore list"
+msgstr "Ignorierliste"
+
+#: faceauth-cli/src/main.rs
+msgid "(none)"
+msgstr "(keine)"
+
+#: faceauth-cli/src/main.rs
+msgid "face authentication disabled for '{user}'."
+msgstr "Gesichtserkennung für '{user}' deaktiviert."
+
+#: faceauth-cli/src/main.rs
+msgid "face authentication enabled for '{user}'."
+msgstr "Gesichtserkennung für '{user}' aktiviert."
+
+#: faceauth-cli/src/main.rs
+msgid "'{requestor}' added to ignore list for '{user}'."
+msgstr "'{requestor}' zur Ignorierliste für '{user}' hinzugefügt."
+
+#: faceauth-cli/src/main.rs
+msgid "'{requestor}' removed from ignore list for '{user}'."
+msgstr "'{requestor}' aus der Ignorierliste für '{user}' entfernt."
 
 #: faceauth-cli/src/main.rs faceauth-cli/src/camera.rs
 msgid "no camera devices found"
@@ -160,24 +168,32 @@ msgid "Select camera (default {index}): "
 msgstr "Kamera auswählen (Standard {index}): "
 
 #: faceauth-cli/src/camera.rs
-msgid "faceauth: invalid selection '{input}'; expected one of: {options}"
-msgstr "faceauth: Ungültige Auswahl '{input}'; erwartet eines von: {options}"
+msgid "invalid selection '{input}'; expected one of: {options}"
+msgstr "Ungültige Auswahl '{input}'; erwartet eines von: {options}"
 
 #: faceauth-cli/src/camera.rs
 msgid "--camera is required in non-interactive mode"
 msgstr "--camera ist im nicht-interaktiven Modus erforderlich"
 
 #: faceauth-cli/src/camera.rs
-msgid "faceauth: could not resolve camera path '{path}'"
-msgstr "faceauth: Kamerapfad '{path}' konnte nicht aufgelöst werden"
+msgid "could not resolve camera path '{path}'"
+msgstr "Kamerapfad '{path}' konnte nicht aufgelöst werden"
 
 #: faceauth-cli/src/camera.rs
-msgid "faceauth: '{spec}' is ambiguous - matches: {matches}; use a full path instead (e.g. --camera /dev/video{example})"
-msgstr "faceauth: '{spec}' ist mehrdeutig - Treffer: {matches}; stattdessen vollständigen Pfad verwenden (z. B. --camera /dev/video{example})"
+msgid "'{spec}' is ambiguous - matches: {matches}; use a full path instead (e.g. --camera /dev/video{example})"
+msgstr "'{spec}' ist mehrdeutig - Treffer: {matches}; stattdessen vollständigen Pfad verwenden (z. B. --camera /dev/video{example})"
 
 #: faceauth-cli/src/camera.rs
-msgid "faceauth: unrecognised camera '{spec}'; use an index, /dev/videoN path, or udev name"
-msgstr "faceauth: Unbekannte Kamera '{spec}'; bitte Index, /dev/videoN-Pfad oder udev-Namen verwenden"
+msgid "unrecognised camera '{spec}'; use an index, /dev/videoN path, or udev name"
+msgstr "Unbekannte Kamera '{spec}'; bitte Index, /dev/videoN-Pfad oder udev-Namen verwenden"
+
+#: faceauth-cli/src/main.rs
+msgid "capture failed: invalid encoding from daemon"
+msgstr "Aufnahme fehlgeschlagen: Ungültige Kodierung vom Daemon"
+
+#: faceauth-cli/src/main.rs
+msgid "capture failed: unexpected response from daemon"
+msgstr "Aufnahme fehlgeschlagen: Unerwartete Antwort vom Daemon"
 
 #: faceauth-notify/src/main.rs
 msgid "Face Authentication ..."
@@ -194,10 +210,6 @@ msgstr "Angefordert von: {service} über {caller}"
 #: faceauth-notify/src/main.rs
 msgid "Face Authentication Successful"
 msgstr "Gesichtserkennung erfolgreich"
-
-#: faceauth-notify/src/main.rs
-msgid "Access granted"
-msgstr "Zugriff gewährt"
 
 #: faceauth-notify/src/main.rs
 msgid "Face Authentication Failed"

@@ -7,9 +7,9 @@
 //! notify-rust reaches the user's session bus.
 //!
 //! Usage:
-//!   faceauth-notify start   <uid> <service> <caller>  → stdout: <notif_id>
-//!   faceauth-notify success <uid> <notif_id>
-//!   faceauth-notify failure <uid> <notif_id> <reason>
+//!   faceauth-notify start   <uid> <service> [<caller>]  → stdout: <notif_id>
+//!   faceauth-notify success <uid> <notif_id> <service> [<caller>]
+//!   faceauth-notify failure <uid> <notif_id> <service> [<caller>]
 //!
 //! Exits 0 on success, 1 on any error (the PAM module ignores errors).
 
@@ -33,6 +33,16 @@ fn icon_path(data: &[u8], name: &str, uid: u32) -> Option<String> {
     Some(path)
 }
 
+fn requested_by_body(service: &str, caller: &str) -> String {
+    if caller.is_empty() || caller == service {
+        gettext("Requested by: {service}").replace("{service}", service)
+    } else {
+        gettext("Requested by: {service} via {caller}")
+            .replace("{service}", service)
+            .replace("{caller}", caller)
+    }
+}
+
 fn main() {
     gettextrs::setlocale(gettextrs::LocaleCategory::LcAll, "");
     gettextrs::bindtextdomain("faceauth", "/usr/share/locale").expect("failed to bind text domain");
@@ -53,18 +63,10 @@ fn main() {
             let service = args.get(3).map(|s| s.as_str()).unwrap_or("unknown");
             let caller = args.get(4).map(|s| s.as_str()).unwrap_or("");
 
-            let body = if caller.is_empty() || caller == service {
-                gettext("Requested by: {service}").replace("{service}", service)
-            } else {
-                gettext("Requested by: {service} via {caller}")
-                    .replace("{service}", service)
-                    .replace("{caller}", caller)
-            };
-
             let mut notif = Notification::new();
             notif
                 .summary(&gettext("Face Authentication ..."))
-                .body(&body)
+                .body(&requested_by_body(service, caller))
                 .timeout(Timeout::Never);
             if let Some(p) = icon_path(ICON_SVG, "faceauth-icon.svg", uid) {
                 notif.hint(Hint::ImagePath(p));
@@ -83,13 +85,15 @@ fn main() {
                 Some(id) => id,
                 None => process::exit(1),
             };
+            let service = args.get(4).map(|s| s.as_str()).unwrap_or("unknown");
+            let caller = args.get(5).map(|s| s.as_str()).unwrap_or("");
 
             let mut notif = Notification::new();
             notif
                 .id(notif_id)
                 .summary(&gettext("Face Authentication Successful"))
-                .body(&gettext("Access granted"))
-                .timeout(Timeout::Milliseconds(2000));
+                .body(&requested_by_body(service, caller))
+                .timeout(Timeout::Milliseconds(5000));
             if let Some(p) = icon_path(ICON_SUCCESS_SVG, "faceauth-icon-success.svg", uid) {
                 notif.hint(Hint::ImagePath(p));
             }
@@ -101,18 +105,15 @@ fn main() {
                 Some(id) => id,
                 None => process::exit(1),
             };
-
-            let reason = args
-                .get(4)
-                .map(|s| s.as_str())
-                .unwrap_or("Authentication failed");
+            let service = args.get(4).map(|s| s.as_str()).unwrap_or("unknown");
+            let caller = args.get(5).map(|s| s.as_str()).unwrap_or("");
 
             let mut notif = Notification::new();
             notif
                 .id(notif_id)
                 .summary(&gettext("Face Authentication Failed"))
-                .body(reason)
-                .timeout(Timeout::Milliseconds(4000));
+                .body(&requested_by_body(service, caller))
+                .timeout(Timeout::Milliseconds(5000));
             if let Some(p) = icon_path(ICON_FAIL_SVG, "faceauth-icon-fail.svg", uid) {
                 notif.hint(Hint::ImagePath(p));
             }
