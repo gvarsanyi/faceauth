@@ -2,7 +2,10 @@ use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
-use faceauth_core::{authenticate_via_daemon, camera_name_for_index, error::FaceAuthError, load_model_via_daemon};
+use faceauth_core::{
+    authenticate_via_daemon, camera_name_for_index, check_service_via_daemon, error::FaceAuthError,
+    load_model_via_daemon, record_caller_via_daemon,
+};
 use pamsm::{Pam, PamError, PamFlags, PamLibExt, PamMsgStyle, PamServiceModule, LogLvl};
 
 struct FaceAuthPam;
@@ -20,6 +23,18 @@ impl PamServiceModule for FaceAuthPam {
     }
 }
 
+/// True if `PAM_RHOST` is set and non-empty, meaning the authentication
+/// request came from a remote host (e.g. SSH, rlogin).
+fn is_remote_session(pamh: &Pam) -> bool {
+    pamh.get_rhost()
+        .ok()
+        .flatten()
+        .and_then(|c| c.to_str().ok())
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
+}
+
+
 /// Return the name of the calling process's parent by reading /proc.
 fn parent_process_name() -> Option<String> {
     let ppid = std::fs::read_to_string("/proc/self/status")
@@ -35,6 +50,44 @@ fn parent_process_name() -> Option<String> {
     std::fs::read_to_string(format!("/proc/{}/comm", ppid))
         .ok()
         .map(|s| s.trim().to_string())
+}
+
+
+/// Read the PPid field from /proc/<pid>/status, or None if unreadable.
+fn ppid_of(pid: u32) -> Option<u32> {
+    std::fs::read_to_string(format!("/proc/{}/status", pid))
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("PPid:"))?
+                .split_whitespace()
+                .nth(1)?
+                .parse::<u32>()
+                .ok()
+        })
+}
+
+/// True if any ancestor process in the chain is named "sshd".
+///
+/// PAM_RHOST is only set for the direct SSH login; when the user runs `sudo`
+/// inside an SSH session, PAM_RHOST is unset and `has_controlling_tty()`
+/// returns true (SSH allocates a real PTY). Walking the process tree and
+/// checking for an sshd parent catches this case reliably.
+fn has_sshd_ancestor() -> bool {
+    let mut pid = ppid_of(std::process::id());
+    while let Some(p) = pid {
+        if p <= 1 {
+            break;
+        }
+        let comm = std::fs::read_to_string(format!("/proc/{}/comm", p))
+            .ok()
+            .map(|s| s.trim().to_string());
+        if comm.as_deref() == Some("sshd") {
+            return true;
+        }
+        pid = ppid_of(p);
+    }
+    false
 }
 
 /// Look up the primary GID for a UID via getpwuid_r.
@@ -65,9 +118,13 @@ fn gid_for_uid(uid: u32) -> Option<u32> {
 /// Returns the notification ID printed to stdout by the helper, or None if
 /// the helper is unavailable or the user has no graphical session. All errors
 /// are silently swallowed — authentication must never depend on notifications.
-fn notify_start(uid: u32, gid: u32, service: &str, caller: &str) -> Option<u32> {
+fn notify_start(uid: u32, gid: u32, service: &str, caller: &str, auth_timeout_secs: u32) -> Option<u32> {
+    // Give the notification a timeout slightly longer than the auth attempt so
+    // it auto-dismisses if the replacement notification is never delivered
+    // (e.g. when KDE holds notifications while the screen is locked).
+    let notif_timeout_ms = (auth_timeout_secs + 3) * 1000;
     let mut cmd = Command::new(concat!(env!("FACEAUTH_LIBEXEC_DIR"), "/faceauth-notify"));
-    cmd.args(["start", &uid.to_string(), service, caller])
+    cmd.args(["start", &uid.to_string(), service, caller, &notif_timeout_ms.to_string()])
         .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path=/run/user/{uid}/bus"))
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -162,12 +219,33 @@ fn do_authenticate(pamh: &Pam) -> PamError {
         .unwrap_or("unknown")
         .to_string();
 
+    record_caller_via_daemon(&service);
+
     let parent = parent_process_name();
     // `caller` is used in syslog; `parent` is passed to faceauth-notify separately
     // so it can format "Requested by: {service} via {parent}" without double "via".
     let caller = parent.as_deref()
         .map(|name| format!("{service} via {name}"))
         .unwrap_or_else(|| service.clone());
+
+    // Refuse to attempt face authentication for remote or unattended sessions.
+    // These checks happen before touching the daemon to fail fast.
+    if is_remote_session(pamh) {
+        let _ = pamh.syslog(LogLvl::NOTICE, &format!("[{caller}] face authentication skipped for {user_desc}: remote session"));
+        return PamError::AUTHINFO_UNAVAIL;
+    }
+    if has_sshd_ancestor() {
+        let _ = pamh.syslog(LogLvl::NOTICE, &format!("[{caller}] face authentication skipped for {user_desc}: running inside SSH session"));
+        return PamError::AUTHINFO_UNAVAIL;
+    }
+
+    // Check per-user and global opt files via the daemon (which runs as root and
+    // can read /etc/security/faceauth/ regardless of directory permissions).
+    // Service must be opted in (+) to proceed.
+    if !check_service_via_daemon(username, &service) {
+        let _ = pamh.syslog(LogLvl::NOTICE, &format!("[{caller}] face authentication skipped for {user_desc}: service not opted in"));
+        return PamError::AUTHINFO_UNAVAIL;
+    }
 
     // Load the model via the daemon so the PAM module does not need direct
     // access to /etc/security/faceauth/ (which is only readable by faceauthd).
@@ -183,18 +261,6 @@ fn do_authenticate(pamh: &Pam) -> PamError {
             return PamError::AUTHINFO_UNAVAIL;
         }
     };
-
-    if face_model.disabled {
-        let _ = pamh.syslog(LogLvl::NOTICE, &format!("[{caller}] face authentication disabled for {user_desc}, skipping"));
-        return PamError::AUTHINFO_UNAVAIL;
-    }
-
-    let is_ignored = face_model.ignore.iter()
-        .any(|s| s == &service || Some(s.as_str()) == parent.as_deref());
-    if is_ignored {
-        let _ = pamh.syslog(LogLvl::NOTICE, &format!("[{caller}] face authentication ignored for {user_desc} (requestor in ignore list), skipping"));
-        return PamError::AUTHINFO_UNAVAIL;
-    }
 
     let camera_index = face_model.camera.index;
     let camera_desc = match &face_model.camera.by_id {
@@ -217,14 +283,16 @@ fn do_authenticate(pamh: &Pam) -> PamError {
         PamMsgStyle::TEXT_INFO,
     );
 
+    const AUTH_TIMEOUT_SECS: u32 = 5;
+
     // Show a desktop notification so the user knows to look at the camera.
     let notif_id = match (uid, gid) {
-        (Some(u), Some(g)) => notify_start(u, g, &service, parent.as_deref().unwrap_or("")),
+        (Some(u), Some(g)) => notify_start(u, g, &service, parent.as_deref().unwrap_or(""), AUTH_TIMEOUT_SECS),
         _ => None,
     };
 
     // Delegate authentication to the daemon: it owns the encoder and camera.
-    let result = authenticate_via_daemon(username, 5);
+    let result = authenticate_via_daemon(username, AUTH_TIMEOUT_SECS as u64);
 
     // Replace the in-progress notification with the outcome.
     if let (Some(u), Some(g), Some(id)) = (uid, gid, notif_id) {
@@ -253,3 +321,30 @@ fn do_authenticate(pamh: &Pam) -> PamError {
 }
 
 pamsm::pam_module!(FaceAuthPam);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ppid_of(current pid) must return our own parent's PID (which is always > 0).
+    #[test]
+    fn ppid_of_current_process_is_nonzero() {
+        let ppid = ppid_of(std::process::id());
+        assert!(ppid.is_some(), "could not read /proc/self/status");
+        assert!(ppid.unwrap() > 0);
+    }
+
+    /// The test runner always has a parent process with a non-empty name.
+    #[test]
+    fn parent_process_name_is_nonempty() {
+        let name = parent_process_name();
+        assert!(name.is_some(), "could not read parent process name from /proc");
+        assert!(!name.unwrap().is_empty());
+    }
+
+    /// has_sshd_ancestor must complete without panicking regardless of environment.
+    #[test]
+    fn has_sshd_ancestor_does_not_panic() {
+        let _ = has_sshd_ancestor();
+    }
+}

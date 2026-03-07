@@ -194,14 +194,67 @@ fn handle_request(
             }
         }
 
-        Request::SetConfig { username, disabled, ignore_add, ignore_remove } => {
-            if let Some(err) = authorize(&username, peer_uid) { return err; }
+        Request::ListCameras => {
+            let cameras = faceauth_core::list_cameras()
+                .into_iter()
+                .map(|c| {
+                    let suitability = c.suitability();
+                    faceauth_core::ipc::CameraDescriptor {
+                        index: c.index,
+                        name: c.name,
+                        suitability,
+                    }
+                })
+                .collect();
+            Response::Cameras { cameras }
+        }
 
-            match model_call(model_tx, |reply| ModelMsg::SetConfig {
-                username, disabled, ignore_add, ignore_remove, reply,
-            }) {
-                Ok(()) => Response::Ok,
-                Err(e) => e,
+        Request::GetServices { username } => {
+            if let Some(err) = authorize(&username, peer_uid) { return err; }
+            let uid = match faceauth_core::uid_for_username(&username) {
+                Some(u) => u,
+                None => return Response::Err { message: format!("unknown user '{}'", username) },
+            };
+            let services = faceauth_core::compile_services_list(uid)
+                .into_iter()
+                .map(|(name, allowed)| faceauth_core::ipc::ServiceEntry { name, allowed })
+                .collect();
+            Response::Services { services }
+        }
+
+        Request::RecordCaller { service } => {
+            // Verify this is a real PAM service before recording it.
+            let is_real_pam_service =
+                std::path::Path::new("/etc/pam.d").join(&service).exists()
+                || std::path::Path::new("/usr/lib/pam.d").join(&service).exists();
+            if is_real_pam_service {
+                faceauth_core::record_opt_caller(&service);
+            }
+            Response::Ok
+        }
+
+        Request::SetOpt { username, service, allowed } => {
+            if let Some(err) = authorize(&username, peer_uid) { return err; }
+            let uid = match faceauth_core::uid_for_username(&username) {
+                Some(u) => u,
+                None => return Response::Err { message: format!("unknown user '{}'", username) },
+            };
+            // Write the opt entry to <uid>.opt.
+            faceauth_core::write_user_opt_entry(uid, &service, allowed);
+            // Ensure the service appears in defaults.opt too (no-op if already present).
+            faceauth_core::record_opt_caller(&service);
+            Response::Ok
+        }
+
+        Request::CheckService { username, service } => {
+            let uid = match faceauth_core::uid_for_username(&username) {
+                Some(u) => u,
+                None => return Response::Err { message: format!("unknown user '{}'", username) },
+            };
+            if faceauth_core::service_allowed_for_uid(uid, &service) {
+                Response::Ok
+            } else {
+                Response::Err { message: format!("service '{}' not opted in for '{}'", service, username) }
             }
         }
     }

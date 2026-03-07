@@ -62,12 +62,21 @@ fn main() {
         "start" => {
             let service = args.get(3).map(|s| s.as_str()).unwrap_or("unknown");
             let caller = args.get(4).map(|s| s.as_str()).unwrap_or("");
+            // Optional timeout_ms argument: lets the caller set an expiry that
+            // matches the auth timeout. Defaults to 8 s, which covers the
+            // standard 5 s PAM auth timeout plus buffer for the replacement
+            // notification to arrive. Using Never would leave a stale popup
+            // when the screen is locked (KDE holds notifications until unlock,
+            // by which time the replacement may have already been discarded).
+            let timeout_ms: u32 = args.get(5)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(8000);
 
             let mut notif = Notification::new();
             notif
                 .summary(&gettext("Face Authentication ..."))
                 .body(&requested_by_body(service, caller))
-                .timeout(Timeout::Never);
+                .timeout(Timeout::Milliseconds(timeout_ms));
             if let Some(p) = icon_path(ICON_SVG, "faceauth-icon.svg", uid) {
                 notif.hint(Hint::ImagePath(p));
             }

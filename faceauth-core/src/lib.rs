@@ -13,7 +13,10 @@ use camera::{capture_frame, open_camera};
 pub use encoding::FaceEncoder;
 use error::{FaceAuthError, Result};
 pub use encoding::DISTANCE_THRESHOLD;
-pub use model::{load_model_from_json, uid_for_username, username_for_uid};
+pub use model::{
+    compile_services_list, load_model_from_json, record_opt_caller, service_allowed_for_uid,
+    uid_for_username, username_for_uid, write_user_opt_entry,
+};
 use model::FaceModel;
 
 /// Euclidean distance between two 128-D face encodings.
@@ -261,6 +264,52 @@ pub fn authenticate_with_encoder(
 pub fn authenticate_face_with_model(face_model: FaceModel, config: &AuthConfig) -> Result<()> {
     let encoder = FaceEncoder::new()?;
     authenticate_with_encoder(&encoder, face_model, config)
+}
+
+/// Ask the daemon whether `service` is opted in for `username`.
+///
+/// The daemon reads the opt files as root, so this works regardless of
+/// the calling process's filesystem privileges. Returns `false` if the
+/// service is not opted in, the user is unknown, or the daemon is unavailable.
+pub fn check_service_via_daemon(username: &str, service: &str) -> bool {
+    use crate::ipc::{Request, Response, SOCKET_PATH};
+
+    let Ok(stream) = UnixStream::connect(SOCKET_PATH) else { return false };
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+
+    let req = Request::CheckService {
+        username: username.to_string(),
+        service: service.to_string(),
+    };
+    let Ok(mut line) = serde_json::to_string(&req) else { return false };
+    line.push('\n');
+    if (&stream).write_all(line.as_bytes()).is_err() { return false }
+
+    let mut reader = BufReader::new(&stream);
+    let mut line = String::new();
+    if reader.read_line(&mut line).is_err() { return false }
+
+    matches!(serde_json::from_str(line.trim()), Ok(Response::Ok))
+}
+
+/// Notify the daemon that `service` has invoked face authentication.
+///
+/// The daemon records `-service` in the global `.opt` file if not already
+/// present, so the service appears in `faceauth services` output.
+/// Fire-and-forget: uses a 1-second timeout and silently ignores all errors
+/// so this never delays or blocks authentication.
+pub fn record_caller_via_daemon(service: &str) {
+    use crate::ipc::{Request, SOCKET_PATH};
+
+    let Ok(stream) = UnixStream::connect(SOCKET_PATH) else { return };
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+
+    let req = Request::RecordCaller { service: service.to_string() };
+    let Ok(mut line) = serde_json::to_string(&req) else { return };
+    line.push('\n');
+    let _ = (&stream).write_all(line.as_bytes());
+    // Response is not read: fire-and-forget.
 }
 
 /// Authenticate `username` by sending a request to the faceauth daemon.

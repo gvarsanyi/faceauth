@@ -13,6 +13,22 @@ use serde::{Deserialize, Serialize};
 /// Path to the daemon's Unix domain socket.
 pub const SOCKET_PATH: &str = "/run/faceauth/faceauth.sock";
 
+/// Camera descriptor returned by `ListCameras`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CameraDescriptor {
+    pub index: u32,
+    pub name: String,
+    /// Suitability score: 0 = colour webcam, 1 = possible IR, 2 = IR (recommended).
+    pub suitability: u8,
+}
+
+/// A single entry in the merged service opt list.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ServiceEntry {
+    pub name: String,
+    pub allowed: bool,
+}
+
 /// A request from a client to the daemon.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op")]
@@ -65,24 +81,51 @@ pub enum Request {
         timeout_secs: u64,
     },
 
-    /// Update per-user authentication configuration.
+    /// Enumerate all available V4L2 camera capture devices.
     ///
-    /// All fields except `username` are optional; only supplied fields are
-    /// changed. Fields omitted from the request are left at their current value.
+    /// Returns `Response::Cameras` with an array of `CameraDescriptor`s sorted
+    /// by descending suitability (most IR-like first). No authorization required.
+    ListCameras,
+
+    /// Return the merged service opt list for a user.
     ///
-    /// - `disabled`: `Some(true)` to disable face auth globally for this user;
-    ///   `Some(false)` to re-enable it.
-    /// - `ignore_add`: add one service/caller name to the per-user ignore list.
-    /// - `ignore_remove`: remove one name from the ignore list (no-op if absent).
-    SetConfig {
+    /// Combines `defaults.opt` and the user's `<uid>.opt` file.
+    /// Authorization: the caller must own `username` or be root.
+    GetServices { username: String },
+
+    /// Write a `+` or `-` entry for `service` in `<uid>.opt`.
+    ///
+    /// `allowed: true` writes `+service`; `false` writes `-service`.
+    /// Authorization: the caller must own `username` or be root.
+    SetOpt {
         username: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        disabled: Option<bool>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        ignore_add: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        ignore_remove: Option<String>,
+        service: String,
+        allowed: bool,
     },
+
+    /// Check whether `service` is opted in for `username`.
+    ///
+    /// Returns `Response::Ok` if the service is opted in (`+` entry in the
+    /// user's or global opt file), or `Response::Err` if it is not opted in
+    /// or the user is unknown. The daemon reads the opt files as root, so this
+    /// works regardless of the calling process's privileges.
+    /// No user authorization required.
+    CheckService {
+        username: String,
+        service: String,
+    },
+
+    /// Record that `service` has invoked face authentication.
+    ///
+    /// Called by the PAM module on every authentication attempt. The daemon
+    /// writes `-service` to the global `.opt` if the service is not already
+    /// listed, so it appears in every user's `faceauth services` output.
+    ///
+    /// The daemon verifies that `service` corresponds to a real PAM service
+    /// file (`/etc/pam.d/<service>` or `/usr/lib/pam.d/<service>`).
+    /// No user authorization required; the caller UID is obtained via
+    /// `SO_PEERCRED` but not used for access control here.
+    RecordCaller { service: String },
 }
 
 /// A response from the daemon to a client.
@@ -95,6 +138,10 @@ pub enum Response {
     Model { json: String },
     /// Response to `CaptureEncoding`. Contains the 128-D face descriptor.
     Encoding { data: Vec<f32> },
+    /// Response to `ListCameras`. Contains all available capture devices.
+    Cameras { cameras: Vec<CameraDescriptor> },
+    /// Response to `GetServices`. Contains the merged opt list for a user.
+    Services { services: Vec<ServiceEntry> },
 }
 
 #[cfg(test)]
@@ -175,32 +222,6 @@ mod tests {
         assert_eq!(v["username"], "x");
     }
 
-    #[test]
-    fn request_set_config_roundtrip() {
-        let req = Request::SetConfig {
-            username: "eve".to_string(),
-            disabled: Some(true),
-            ignore_add: Some("sudo".to_string()),
-            ignore_remove: None,
-        };
-        let json = serde_json::to_string(&req).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(v["op"], "SetConfig");
-        assert_eq!(v["username"], "eve");
-        assert_eq!(v["disabled"], true);
-        assert_eq!(v["ignore_add"], "sudo");
-        // skip_serializing_if = None means ignore_remove is absent from JSON
-        assert!(v.get("ignore_remove").is_none() || v["ignore_remove"].is_null());
-
-        let back: Request = serde_json::from_str(&json).unwrap();
-        let Request::SetConfig { username, disabled, ignore_add, ignore_remove } = back
-            else { panic!("wrong variant") };
-        assert_eq!(username, "eve");
-        assert_eq!(disabled, Some(true));
-        assert_eq!(ignore_add, Some("sudo".to_string()));
-        assert_eq!(ignore_remove, None);
-    }
-
     // --- Response round-trips ---
 
     #[test]
@@ -255,5 +276,84 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&Response::Ok).unwrap()).unwrap();
         assert_eq!(v["status"], "Ok");
+    }
+
+    #[test]
+    fn request_list_cameras_roundtrip() {
+        let json = serde_json::to_string(&Request::ListCameras).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["op"], "ListCameras");
+        let back: Request = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, Request::ListCameras));
+    }
+
+    #[test]
+    fn request_get_services_roundtrip() {
+        let req = Request::GetServices { username: "alice".to_string() };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: Request = serde_json::from_str(&json).unwrap();
+        let Request::GetServices { username } = back else { panic!("wrong variant") };
+        assert_eq!(username, "alice");
+    }
+
+    #[test]
+    fn request_set_opt_roundtrip() {
+        let req = Request::SetOpt {
+            username: "bob".to_string(),
+            service: "sudo".to_string(),
+            allowed: false,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["op"], "SetOpt");
+        assert_eq!(v["allowed"], false);
+        let back: Request = serde_json::from_str(&json).unwrap();
+        let Request::SetOpt { username, service, allowed } = back else { panic!("wrong variant") };
+        assert_eq!(username, "bob");
+        assert_eq!(service, "sudo");
+        assert!(!allowed);
+    }
+
+    #[test]
+    fn request_record_caller_roundtrip() {
+        let req = Request::RecordCaller { service: "login".to_string() };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: Request = serde_json::from_str(&json).unwrap();
+        let Request::RecordCaller { service } = back else { panic!("wrong variant") };
+        assert_eq!(service, "login");
+    }
+
+    #[test]
+    fn response_cameras_roundtrip() {
+        let resp = Response::Cameras {
+            cameras: vec![
+                CameraDescriptor { index: 0, name: "FaceTime HD".to_string(), suitability: 2 },
+                CameraDescriptor { index: 1, name: "USB Cam".to_string(), suitability: 0 },
+            ],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: Response = serde_json::from_str(&json).unwrap();
+        let Response::Cameras { cameras } = back else { panic!("wrong variant") };
+        assert_eq!(cameras.len(), 2);
+        assert_eq!(cameras[0].index, 0);
+        assert_eq!(cameras[0].suitability, 2);
+        assert_eq!(cameras[1].name, "USB Cam");
+    }
+
+    #[test]
+    fn response_services_roundtrip() {
+        let resp = Response::Services {
+            services: vec![
+                ServiceEntry { name: "sudo".to_string(), allowed: false },
+                ServiceEntry { name: "sddm".to_string(), allowed: true },
+            ],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: Response = serde_json::from_str(&json).unwrap();
+        let Response::Services { services } = back else { panic!("wrong variant") };
+        assert_eq!(services.len(), 2);
+        assert_eq!(services[0].name, "sudo");
+        assert!(!services[0].allowed);
+        assert!(services[1].allowed);
     }
 }

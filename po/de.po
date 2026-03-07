@@ -1,4 +1,4 @@
-# faceauth — face authentication tool
+# faceauth - face authentication tool
 # Copyright (C) 2024 faceauth contributors
 # This file is distributed under the same license as the faceauth package.
 #
@@ -106,42 +106,6 @@ msgstr "Kamera nach Pfad"
 #: faceauth-cli/src/main.rs
 msgid "Batches"
 msgstr "Batches"
-
-#: faceauth-cli/src/main.rs
-msgid "Disabled"
-msgstr "Deaktiviert"
-
-#: faceauth-cli/src/main.rs
-msgid "yes"
-msgstr "ja"
-
-#: faceauth-cli/src/main.rs
-msgid "no"
-msgstr "nein"
-
-#: faceauth-cli/src/main.rs
-msgid "Ignore list"
-msgstr "Ignorierliste"
-
-#: faceauth-cli/src/main.rs
-msgid "(none)"
-msgstr "(keine)"
-
-#: faceauth-cli/src/main.rs
-msgid "face authentication disabled for '{user}'."
-msgstr "Gesichtserkennung für '{user}' deaktiviert."
-
-#: faceauth-cli/src/main.rs
-msgid "face authentication enabled for '{user}'."
-msgstr "Gesichtserkennung für '{user}' aktiviert."
-
-#: faceauth-cli/src/main.rs
-msgid "'{requestor}' added to ignore list for '{user}'."
-msgstr "'{requestor}' zur Ignorierliste für '{user}' hinzugefügt."
-
-#: faceauth-cli/src/main.rs
-msgid "'{requestor}' removed from ignore list for '{user}'."
-msgstr "'{requestor}' aus der Ignorierliste für '{user}' entfernt."
 
 #: faceauth-cli/src/main.rs faceauth-cli/src/camera.rs
 msgid "no camera devices found"

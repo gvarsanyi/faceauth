@@ -183,7 +183,7 @@ pub fn list_cameras() -> Vec<CameraInfo> {
         })
         .collect();
 
-    cameras.sort_by(|a, b| b.suitability().cmp(&a.suitability()).then(a.index.cmp(&b.index)));
+    cameras.sort_by_key(|c| c.index);
     cameras
 }
 

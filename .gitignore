@@ -1,5 +1,8 @@
-.claude
+/build-kcm
 /target/
+.cache
+.claude
+CLAUDE.md
 
 # dlib pre-trained model files — downloaded automatically by build.rs.
 # Never commit these; they are large binary files (~31 MB combined).

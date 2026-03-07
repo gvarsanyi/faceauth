@@ -22,10 +22,8 @@ fn camera_name(cam: &CameraInfo) -> String {
 /// Print a table of available cameras to stderr and return the list.
 pub fn print_camera_list() -> Vec<CameraInfo> {
     let cameras = list_cameras();
-    let mut sorted: Vec<&CameraInfo> = cameras.iter().collect();
-    sorted.sort_by_key(|c| c.index);
     eprintln!("{}", gettext("Available cameras:"));
-    for cam in &sorted {
+    for cam in &cameras {
         eprintln!(
             "  /dev/video{}  {}{}",
             cam.index,
@@ -46,14 +44,14 @@ fn stdin_is_tty() -> bool {
 /// Lists cameras, shows the recommended default, reads a line from stdin.
 /// An empty line (just Enter) accepts the default.
 fn prompt_camera(cameras: &[CameraInfo]) -> u32 {
-    let default = &cameras[0]; // list_cameras() sorts by suitability descending — best choice
-
-    // Display in natural /dev/videoN order for readability.
-    let mut sorted: Vec<&CameraInfo> = cameras.iter().collect();
-    sorted.sort_by_key(|c| c.index);
+    // Pick the highest-suitability camera as default; break ties by lowest index
+    // (cameras are already sorted by index ascending, so the first maximum wins).
+    let default = cameras.iter()
+        .max_by(|a, b| a.suitability().cmp(&b.suitability()).then(b.index.cmp(&a.index)))
+        .unwrap();
 
     eprintln!("{}", gettext("Available cameras:"));
-    for cam in sorted.iter() {
+    for cam in cameras {
         let marker = if cam.index == default.index { "*" } else { " " };
         eprintln!(
             "  {} {}.  /dev/video{}  {}{}",
@@ -65,7 +63,7 @@ fn prompt_camera(cameras: &[CameraInfo]) -> u32 {
         );
     }
 
-    let valid_indices: Vec<u32> = sorted.iter().map(|c| c.index).collect();
+    let valid_indices: Vec<u32> = cameras.iter().map(|c| c.index).collect();
     eprintln!();
     eprint!(
         "{}",

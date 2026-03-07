@@ -79,29 +79,30 @@ enum Commands {
     /// List available camera devices and their suitability for face authentication.
     Cameras,
 
-    /// Disable face authentication for a user.
+    /// Opt out a PAM service from face authentication for this user.
     ///
-    /// When disabled, the PAM module skips face auth and falls through to the
-    /// next configured module (e.g. password). Use `enable` to re-enable.
-    Disable,
-
-    /// Re-enable face authentication for a user.
-    Enable,
-
-    /// Add an application to the per-user ignore list.
-    ///
-    /// Face authentication is silently skipped when the requesting PAM service
-    /// or parent process matches an entry in the ignore list.
+    /// Writes a `-service` entry to the user's opt file. Face auth is skipped
+    /// when this service requests it. Use `unignore` to re-enable.
     Ignore {
-        /// PAM service name or parent process name to ignore (e.g. "sudo").
+        /// PAM service name to opt out (e.g. "sudo").
         requestor: String,
     },
 
-    /// Remove an application from the per-user ignore list.
+    /// Re-enable face authentication for a PAM service for this user.
+    ///
+    /// Writes a `+service` entry to the user's opt file, overriding any
+    /// previous opt-out. Use `ignore` to opt back out.
     Unignore {
-        /// PAM service name or parent process name to remove.
+        /// PAM service name to re-enable (e.g. "sudo").
         requestor: String,
     },
+
+    /// List known PAM services and their opt-in status for this user.
+    ///
+    /// Shows all services recorded in the global opt file and any user
+    /// overrides. A `+` prefix means face auth is active for that service;
+    /// `-` means it is skipped.
+    Services,
 }
 
 /// Send a request to the daemon and return the response.
@@ -508,17 +509,6 @@ fn main() {
                 println!("{}: {}", gettext("Camera by-path"), by_path);
             }
             println!("{}: {}", gettext("Batches"), model.encodings.len());
-            println!(
-                "{}: {}",
-                gettext("Disabled"),
-                if model.disabled { gettext("yes") } else { gettext("no") }
-            );
-            let ignore_display = if model.ignore.is_empty() {
-                gettext("(none)")
-            } else {
-                model.ignore.join(", ")
-            };
-            println!("{}: {}", gettext("Ignore list"), ignore_display);
         }
 
         Commands::Cameras => {
@@ -529,78 +519,17 @@ fn main() {
             }
         }
 
-        Commands::Disable => {
-            let req = Request::SetConfig {
-                username: username.clone(),
-                disabled: Some(true),
-                ignore_add: None,
-                ignore_remove: None,
-            };
-            match daemon_request(&req) {
-                Some(Response::Ok) => {
-                    println!(
-                        "faceauth: {}",
-                        gettext("face authentication disabled for '{user}'.")
-                            .replace("{user}", &username)
-                    );
-                }
-                Some(Response::Err { message }) => {
-                    eprintln!("faceauth: {}", message);
-                    process::exit(1);
-                }
-                Some(_) => {
-                    eprintln!("faceauth: {}", gettext("unexpected response from daemon"));
-                    process::exit(1);
-                }
-                None => {
-                    eprintln!("faceauth: daemon not available");
-                    process::exit(1);
-                }
-            }
-        }
-
-        Commands::Enable => {
-            let req = Request::SetConfig {
-                username: username.clone(),
-                disabled: Some(false),
-                ignore_add: None,
-                ignore_remove: None,
-            };
-            match daemon_request(&req) {
-                Some(Response::Ok) => {
-                    println!(
-                        "faceauth: {}",
-                        gettext("face authentication enabled for '{user}'.")
-                            .replace("{user}", &username)
-                    );
-                }
-                Some(Response::Err { message }) => {
-                    eprintln!("faceauth: {}", message);
-                    process::exit(1);
-                }
-                Some(_) => {
-                    eprintln!("faceauth: {}", gettext("unexpected response from daemon"));
-                    process::exit(1);
-                }
-                None => {
-                    eprintln!("faceauth: daemon not available");
-                    process::exit(1);
-                }
-            }
-        }
-
         Commands::Ignore { requestor } => {
-            let req = Request::SetConfig {
+            let req = Request::SetOpt {
                 username: username.clone(),
-                disabled: None,
-                ignore_add: Some(requestor.clone()),
-                ignore_remove: None,
+                service: requestor.clone(),
+                allowed: false,
             };
             match daemon_request(&req) {
                 Some(Response::Ok) => {
                     println!(
                         "faceauth: {}",
-                        gettext("'{requestor}' added to ignore list for '{user}'.")
+                        gettext("face authentication disabled for '{requestor}' (user '{user}').")
                             .replace("{requestor}", &requestor)
                             .replace("{user}", &username)
                     );
@@ -621,20 +550,47 @@ fn main() {
         }
 
         Commands::Unignore { requestor } => {
-            let req = Request::SetConfig {
+            let req = Request::SetOpt {
                 username: username.clone(),
-                disabled: None,
-                ignore_add: None,
-                ignore_remove: Some(requestor.clone()),
+                service: requestor.clone(),
+                allowed: true,
             };
             match daemon_request(&req) {
                 Some(Response::Ok) => {
                     println!(
                         "faceauth: {}",
-                        gettext("'{requestor}' removed from ignore list for '{user}'.")
+                        gettext("face authentication enabled for '{requestor}' (user '{user}').")
                             .replace("{requestor}", &requestor)
                             .replace("{user}", &username)
                     );
+                }
+                Some(Response::Err { message }) => {
+                    eprintln!("faceauth: {}", message);
+                    process::exit(1);
+                }
+                Some(_) => {
+                    eprintln!("faceauth: {}", gettext("unexpected response from daemon"));
+                    process::exit(1);
+                }
+                None => {
+                    eprintln!("faceauth: daemon not available");
+                    process::exit(1);
+                }
+            }
+        }
+
+        Commands::Services => {
+            let req = Request::GetServices { username: username.clone() };
+            match daemon_request(&req) {
+                Some(Response::Services { services }) => {
+                    if services.is_empty() {
+                        println!("faceauth: {}", gettext("no services recorded yet"));
+                    } else {
+                        for entry in &services {
+                            let prefix = if entry.allowed { '+' } else { '-' };
+                            println!("{}{}", prefix, entry.name);
+                        }
+                    }
                 }
                 Some(Response::Err { message }) => {
                     eprintln!("faceauth: {}", message);

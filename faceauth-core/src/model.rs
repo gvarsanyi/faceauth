@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::os::unix::io::AsRawFd;
+use std::path::{Path, PathBuf};
 
 use crate::error::{FaceAuthError, Result};
 
@@ -100,27 +103,15 @@ fn encoding_from_hex(s: &str) -> std::result::Result<[f32; 128], String> {
 /// Each inner Vec is one enrollment batch (e.g. 5 captures in one `faceauth add` run).
 #[derive(Debug, Serialize, Deserialize)]
 struct FaceModelDisk {
-    version: u32,
     camera: CameraId,
-    /// When true the PAM module skips face auth and falls through to the next module.
-    #[serde(default)]
-    disabled: bool,
-    /// PAM services or parent process names for which face auth is silently skipped.
-    #[serde(default)]
-    ignore: Vec<String>,
     encodings: Vec<Vec<String>>,
 }
 
 #[derive(Debug)]
 pub struct FaceModel {
-    pub version: u32,
     /// Camera used during enrollment. Authentication reuses this so the same
     /// physical device is always used without requiring the caller to remember it.
     pub camera: CameraId,
-    /// When true the PAM module skips face auth and falls through to the next module.
-    pub disabled: bool,
-    /// PAM services or parent process names for which face auth is silently skipped.
-    pub ignore: Vec<String>,
     /// Batches of 128-dimensional dlib face descriptor vectors.
     /// Each inner Vec is one enrollment batch from a single `faceauth add` run.
     pub encodings: Vec<Vec<[f32; 128]>>,
@@ -130,10 +121,7 @@ impl FaceModel {
     /// Create a new empty model recorded with `camera`.
     pub fn new(camera: CameraId) -> Self {
         FaceModel {
-            version: 2,
             camera,
-            disabled: false,
-            ignore: Vec::new(),
             encodings: Vec::new(),
         }
     }
@@ -168,10 +156,7 @@ pub fn load_model_from_json(contents: &str) -> Result<FaceModel> {
         })
         .collect::<Result<Vec<Vec<[f32; 128]>>>>()?;
     Ok(FaceModel {
-        version: disk.version,
         camera: disk.camera,
-        disabled: disk.disabled,
-        ignore: disk.ignore,
         encodings,
     })
 }
@@ -225,10 +210,7 @@ pub fn load_or_create_model(username: &str, camera: CameraId) -> Result<FaceMode
 pub fn save_model(uid: u32, model: &FaceModel) -> Result<()> {
     let path = model_path(uid);
     let disk = FaceModelDisk {
-        version: model.version,
         camera: model.camera.clone(),
-        disabled: model.disabled,
-        ignore: model.ignore.clone(),
         encodings: model.encodings.iter()
             .map(|batch| batch.iter().map(encoding_to_hex).collect())
             .collect(),
@@ -250,6 +232,172 @@ pub fn save_model(uid: u32, model: &FaceModel) -> Result<()> {
     fs::rename(&tmp_path, &path)?;
 
     Ok(())
+}
+
+/// Path to the per-user opt file (`<MODEL_DIR>/<uid>.opt`).
+pub fn opt_path(uid: u32) -> PathBuf {
+    PathBuf::from(MODEL_DIR).join(format!("{}.opt", uid))
+}
+
+/// Path to the global opt file (`<MODEL_DIR>/defaults.opt`).
+pub fn global_opt_path() -> PathBuf {
+    PathBuf::from(MODEL_DIR).join("defaults.opt")
+}
+
+/// Return `true` if `s` is a valid Linux service name:
+/// starts with an ASCII alphanumeric character, followed by zero or more
+/// ASCII alphanumerics, underscores, dots, or hyphens.
+fn is_valid_service_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphanumeric() => {},
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
+}
+
+/// Parse a single opt-file line. All whitespace is stripped before matching.
+/// Returns `Some((allowed, name))` if the line is `+name` or `-name` with a
+/// valid service name; returns `None` for any other content (blank, comment,
+/// malformed).
+fn parse_opt_line(line: &str) -> Option<(bool, String)> {
+    let stripped: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+    let (allowed, name) = if let Some(n) = stripped.strip_prefix('+') {
+        (true, n.to_string())
+    } else if let Some(n) = stripped.strip_prefix('-') {
+        (false, n.to_string())
+    } else {
+        return None;
+    };
+    if is_valid_service_name(&name) { Some((allowed, name)) } else { None }
+}
+
+/// Parse an opt file. Missing or unreadable files are treated as empty.
+/// Lines that do not match `[+-]<valid-service-name>` (after whitespace
+/// removal) are silently ignored.
+/// Returns a map of service name -> allowed (true = `+`, false = `-`).
+pub fn read_opt_file(path: &Path) -> HashMap<String, bool> {
+    let mut map = HashMap::new();
+    let contents = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return map,
+    };
+    for line in contents.lines() {
+        if let Some((allowed, name)) = parse_opt_line(line) {
+            map.insert(name, allowed);
+        }
+    }
+    map
+}
+
+/// Merge `defaults.opt` and `<uid>.opt` into a sorted list of `(service, allowed)` pairs.
+///
+/// User entries override global entries for the same service name.
+pub fn compile_services_list(uid: u32) -> Vec<(String, bool)> {
+    let mut merged = read_opt_file(&global_opt_path());
+    for (name, allowed) in read_opt_file(&opt_path(uid)) {
+        merged.insert(name, allowed);
+    }
+    let mut list: Vec<(String, bool)> = merged.into_iter().collect();
+    list.sort_by(|a, b| a.0.cmp(&b.0));
+    list
+}
+
+/// Return whether a PAM service is allowed for a given UID.
+///
+/// - If the service appears in `<uid>.opt`, its flag is authoritative.
+/// - If not, it falls through to `defaults.opt`; `+` there means allowed.
+/// - If absent from both, the service is not allowed (opt-in model).
+pub fn service_allowed_for_uid(uid: u32, service: &str) -> bool {
+    let uid_map = read_opt_file(&opt_path(uid));
+    if let Some(&allowed) = uid_map.get(service) {
+        return allowed;
+    }
+    let global = read_opt_file(&global_opt_path());
+    global.get(service).copied().unwrap_or(false)
+}
+
+/// Append `service` to `defaults.opt` with a `-` prefix if not already listed.
+///
+/// Called by the daemon (running as root) when it receives a `RecordCaller`
+/// or `SetOpt` request. Uses `flock(LOCK_EX)` to serialize concurrent callers.
+/// All errors are silently ignored.
+pub fn record_opt_caller(service: &str) {
+    let path = global_opt_path();
+    let mut file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&path)
+    {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+
+    // Global opt file must be world-readable so non-root PAM processes can read it.
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
+
+    // SAFETY: flock is safe on a valid fd; File keeps the fd valid.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return;
+    }
+
+    let mut contents = String::new();
+    let _ = file.read_to_string(&mut contents);
+
+    let already = contents.lines().any(|l| {
+        parse_opt_line(l).map(|(_, n)| n == service).unwrap_or(false)
+    });
+    if !already {
+        let _ = file.seek(SeekFrom::End(0));
+        let _ = writeln!(file, "-{}", service);
+    }
+    // flock released on drop
+}
+
+/// Write or update a `+/-` entry for `service` in the user's `<uid>.opt` file.
+///
+/// Called by the daemon (running as faceauthd) which owns MODEL_DIR and all
+/// files within it. The file is created if absent, mode 0644 so any user's
+/// PAM module can read it. Uses `flock(LOCK_EX)` to serialize concurrent
+/// writers. All errors are silently ignored.
+pub fn write_user_opt_entry(uid: u32, service: &str, allowed: bool) {
+    let path = opt_path(uid);
+    let mut file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&path)
+    {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+
+    // World-readable so non-root PAM processes can read the user's opt file.
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
+
+    // SAFETY: flock is safe on a valid fd; File keeps the fd valid.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return;
+    }
+
+    let mut contents = String::new();
+    let _ = file.read_to_string(&mut contents);
+
+    // Remove any existing line for this service; preserve unrecognised lines.
+    let filtered: String = contents.lines()
+        .filter(|l| {
+            parse_opt_line(l).map(|(_, n)| n != service).unwrap_or(true)
+        })
+        .flat_map(|l| [l, "\n"])
+        .collect();
+
+    let prefix = if allowed { '+' } else { '-' };
+    let new_contents = format!("{}{}{}\n", filtered, prefix, service);
+
+    let _ = file.seek(SeekFrom::Start(0));
+    let _ = file.set_len(0);
+    let _ = file.write_all(new_contents.as_bytes());
 }
 
 /// Returns `true` if a model file already exists for `username`.
@@ -299,10 +447,7 @@ mod tests {
         model.add_batch(vec![enc]);
 
         let disk = FaceModelDisk {
-            version: model.version,
             camera: model.camera.clone(),
-            disabled: model.disabled,
-            ignore: model.ignore.clone(),
             encodings: model.encodings.iter()
                 .map(|batch| batch.iter().map(encoding_to_hex).collect())
                 .collect(),
@@ -326,43 +471,16 @@ mod tests {
     fn face_model_new_initial_state() {
         let camera = CameraId { by_id: None, by_path: None, index: 3 };
         let model = FaceModel::new(camera);
-        assert_eq!(model.version, 2);
         assert_eq!(model.camera.index, 3);
         assert!(model.encodings.is_empty());
-        assert!(!model.disabled);
-        assert!(model.ignore.is_empty());
     }
 
-    /// Old model files without `disabled` / `ignore` must deserialize without error,
-    /// defaulting to `false` and `[]` respectively.
+    /// Legacy JSON containing `version`, `disabled`, and `ignore` deserializes
+    /// without error; unknown fields are silently ignored by serde.
     #[test]
-    fn load_model_from_json_backward_compat_missing_fields() {
-        let json = r#"{"version":2,"camera":{"by_id":null,"by_path":null,"index":0},"encodings":[]}"#;
-        let model = load_model_from_json(json).unwrap();
-        assert!(!model.disabled);
-        assert!(model.ignore.is_empty());
-    }
-
-    /// `disabled` and `ignore` values survive a JSON round-trip.
-    #[test]
-    fn load_model_from_json_disabled_and_ignore_preserved() {
-        let camera = CameraId { by_id: None, by_path: None, index: 0 };
-        let mut model = FaceModel::new(camera);
-        model.disabled = true;
-        model.ignore = vec!["sudo".to_string(), "login".to_string()];
-
-        let disk = FaceModelDisk {
-            version: model.version,
-            camera: model.camera.clone(),
-            disabled: model.disabled,
-            ignore: model.ignore.clone(),
-            encodings: vec![],
-        };
-        let json = serde_json::to_string(&disk).unwrap();
-        let loaded = load_model_from_json(&json).unwrap();
-
-        assert!(loaded.disabled);
-        assert_eq!(loaded.ignore, vec!["sudo", "login"]);
+    fn load_model_from_json_ignores_legacy_fields() {
+        let json = r#"{"version":2,"camera":{"by_id":null,"by_path":null,"index":0},"disabled":true,"ignore":["sudo","login"],"encodings":[]}"#;
+        load_model_from_json(json).unwrap();
     }
 
     #[test]
@@ -373,10 +491,7 @@ mod tests {
         model.add_batch(vec![enc]);
 
         let disk = FaceModelDisk {
-            version: model.version,
             camera: model.camera.clone(),
-            disabled: model.disabled,
-            ignore: model.ignore.clone(),
             encodings: model.encodings.iter()
                 .map(|batch| batch.iter().map(encoding_to_hex).collect())
                 .collect(),
@@ -384,7 +499,6 @@ mod tests {
         let json = serde_json::to_string(&disk).unwrap();
 
         let loaded = load_model_from_json(&json).unwrap();
-        assert_eq!(loaded.version, 2);
         assert_eq!(loaded.encodings.len(), 1);
         assert_eq!(loaded.encodings[0].len(), 1);
         assert_eq!(loaded.encodings[0][0], enc);
@@ -425,5 +539,99 @@ mod tests {
     fn encoding_from_hex_wrong_length() {
         assert!(encoding_from_hex("tooshort").is_err());
         assert!(encoding_from_hex(&"a".repeat(128 * 8 + 1)).is_err());
+    }
+
+    // --- is_valid_service_name ---
+
+    #[test]
+    fn valid_service_names() {
+        for name in &["sudo", "sddm", "login", "kde-wallet", "polkit-1", "systemd-user",
+                      "gnome.screensaver", "a", "A0", "s_v_c"] {
+            assert!(is_valid_service_name(name), "expected valid: {name}");
+        }
+    }
+
+    #[test]
+    fn invalid_service_names() {
+        for name in &["", "-sudo", "_sudo", ".sudo", "foo bar", "foo#bar", "foo/bar",
+                      "foo\nbar"] {
+            assert!(!is_valid_service_name(name), "expected invalid: {name}");
+        }
+    }
+
+    // --- parse_opt_line ---
+
+    #[test]
+    fn parse_opt_line_allowed() {
+        assert_eq!(parse_opt_line("+sudo"), Some((true, "sudo".to_string())));
+    }
+
+    #[test]
+    fn parse_opt_line_denied() {
+        assert_eq!(parse_opt_line("-sddm"), Some((false, "sddm".to_string())));
+    }
+
+    #[test]
+    fn parse_opt_line_strips_whitespace() {
+        assert_eq!(parse_opt_line("  + sudo  "), Some((true, "sudo".to_string())));
+        assert_eq!(parse_opt_line("\t-login"), Some((false, "login".to_string())));
+    }
+
+    #[test]
+    fn parse_opt_line_rejects_blank_and_comment() {
+        assert_eq!(parse_opt_line(""), None);
+        assert_eq!(parse_opt_line("   "), None);
+        assert_eq!(parse_opt_line("# comment"), None);
+    }
+
+    #[test]
+    fn parse_opt_line_rejects_no_prefix() {
+        assert_eq!(parse_opt_line("sudo"), None);
+    }
+
+    #[test]
+    fn parse_opt_line_rejects_invalid_name() {
+        assert_eq!(parse_opt_line("+-invalid"), None);
+        assert_eq!(parse_opt_line("+"), None);
+        assert_eq!(parse_opt_line("-"), None);
+    }
+
+    // --- read_opt_file ---
+
+    #[test]
+    fn read_opt_file_missing_file_returns_empty() {
+        let map = read_opt_file(std::path::Path::new("/nonexistent/path/to/file.opt"));
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn read_opt_file_parses_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.opt");
+        std::fs::write(&path, "+sudo\n-login\n+sddm\n").unwrap();
+        let map = read_opt_file(&path);
+        assert_eq!(map.get("sudo"), Some(&true));
+        assert_eq!(map.get("login"), Some(&false));
+        assert_eq!(map.get("sddm"), Some(&true));
+    }
+
+    #[test]
+    fn read_opt_file_skips_invalid_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.opt");
+        std::fs::write(&path, "+sudo\n# comment\n\nbadline\n-login\n").unwrap();
+        let map = read_opt_file(&path);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get("sudo"), Some(&true));
+        assert_eq!(map.get("login"), Some(&false));
+    }
+
+    #[test]
+    fn read_opt_file_last_entry_wins_for_duplicate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.opt");
+        std::fs::write(&path, "+sudo\n-sudo\n").unwrap();
+        let map = read_opt_file(&path);
+        assert_eq!(map.get("sudo"), Some(&false));
     }
 }

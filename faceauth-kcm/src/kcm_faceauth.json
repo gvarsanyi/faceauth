@@ -1,0 +1,12 @@
+{
+  "KPlugin": {
+    "Authors": [{ "Name": "faceauth contributors" }],
+    "Description": "Manage face authentication enrollment and settings",
+    "Icon": "faceauth",
+    "License": "GPL-2.0-or-later",
+    "Name": "Face Authentication",
+    "Version": "0.8.0"
+  },
+  "X-KDE-Keywords": "face,authentication,biometric,enroll,camera",
+  "X-KDE-System-Settings-Parent-Category": "security-privacy"
+}

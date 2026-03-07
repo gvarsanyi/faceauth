@@ -1,9 +1,9 @@
-# faceauth — face authentication tool
+# faceauth - face authentication tool
 # Copyright (C) 2024 faceauth contributors
 # This file is distributed under the same license as the faceauth package.
 #
 # Translators: named placeholders like {user}, {error}, {count} are replaced
-# at runtime — keep them exactly as-is, but you may reorder them to suit your
+# at runtime - keep them exactly as-is, but you may reorder them to suit your
 # language's grammar. The prefix "faceauth:" in error messages is the program
 # name and should be kept.
 #
