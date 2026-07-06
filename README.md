@@ -14,7 +14,7 @@ A facial recognition authentication system for Linux, written in Rust. Integrate
 - Desktop notifications for authentication events (start, success, failure) via D-Bus
 - Secure model storage with atomic writes and strict file permissions
 - Fallback support: returns `AUTHINFO_UNAVAIL` on any non-match (no model enrolled, camera unavailable, timeout, etc.), allowing the PAM stack to fall through to password auth
-- Automatically skipped for SSH sessions (direct login and any subprocess within, e.g. `sudo`) and background/unattended processes (no controlling terminal); face auth only runs in interactive local sessions
+- Automatically skipped for SSH sessions (direct login and any subprocess within, e.g. `sudo`) and non-interactive processes (no controlling terminal, no display variables in environment, and no active login session for the user); face auth only runs in interactive local sessions
 
 ## Architecture
 
@@ -136,10 +136,10 @@ Prints the enrolled camera's stable udev identifiers and fallback index, and the
 ```bash
 faceauth ignore sudo          # never use face auth when sudo asks
 faceauth ignore kscreenlocker # skip for the lock screen
-faceauth unignore sudo        # remove sudo from the ignore list
+faceauth unignore sudo        # re-enable face auth for sudo
 ```
 
-The ignore list stores PAM service names (e.g. `sudo`, `login`) and parent process names. When either the PAM service or the parent process of the authenticating process matches an entry, face authentication is silently skipped.
+Face auth is opt-in per PAM service. Each service is recorded as disabled (`-`) the first time it requests face auth. `faceauth ignore` forces a `-` entry in the user's opt file; `faceauth unignore` forces a `+` entry to explicitly enable it.
 
 ### List cameras
 
@@ -233,7 +233,7 @@ Generated files (`assets/icons/png/` and `assets/icons/*.ico`) are excluded from
 
 ## How It Works
 
-1. **Enrollment**: The CLI asks the daemon to capture a face encoding (`CaptureEncoding`). The daemon opens the camera, detects a face using dlib, computes a 128-dimensional encoding vector via a ResNet model, and returns it to the CLI. The CLI then sends the encoding to the daemon (`Enroll`), which verifies the caller's identity via `SO_PEERCRED` and appends it to `/etc/security/faceauth/<uid>.json`.
+1. **Enrollment**: The CLI asks the daemon to capture a face encoding (`CaptureEncoding`). The daemon opens the camera, detects a face using dlib, computes a 128-dimensional encoding vector via a ResNet model, and returns it to the CLI. The CLI then sends the encoding to the daemon (`Enroll`), which verifies the caller's identity via `SO_PEERCRED` and appends it to `/etc/security/faceauth/<uid>.enc.json`.
 
 2. **Authentication**: The PAM module (or `faceauth test`) sends an `Authenticate` request to the daemon. The daemon loads the user's stored encodings from disk, opens the enrolled camera, and captures live frames in a loop until a match is found or the timeout expires. A match is declared when the Euclidean distance between a live encoding and a stored encoding is below `0.6` (the threshold recommended by dlib). The daemon reports success or failure back over the socket.
 
@@ -241,7 +241,7 @@ Generated files (`assets/icons/png/` and `assets/icons/*.ico`) are excluded from
 
 ## Model Storage
 
-Models are stored as JSON files named by numeric UID (`/etc/security/faceauth/<uid>.json`), with permissions `0640`, owned by the enrolled user. Using the UID means enrollments survive username renames. Writes are atomic (temp file + rename) to prevent corruption.
+Models are stored as JSON files named by numeric UID (`/etc/security/faceauth/<uid>.enc.json`), with permissions `0640`, owned by the enrolled user. Using the UID means enrollments survive username renames. Writes are atomic (temp file + rename) to prevent corruption.
 
 Each file contains the camera identifiers and the face encoding batches. Legacy fields (`disabled`, `ignore`, `version`) in old model files are silently ignored on load.
 
@@ -250,7 +250,7 @@ Each file contains the camera identifiers and the face encoding batches. Legacy 
 - Model files use `0640` permissions, owned by the enrolled user; readable by the user, not by others
 - The PAM module catches panics to safely interop with the C-based PAM stack
 - The 0.6 distance threshold is the standard dlib recommendation; tighter thresholds increase security at the cost of false rejections
-- Face authentication is refused for: remote sessions (`PAM_RHOST` set: SSH direct login), any process running inside an SSH session (detected by walking the process ancestor chain for `sshd`), and processes with no controlling terminal (cron, systemd services, background scripts); all return `AUTHINFO_UNAVAIL` without contacting the daemon
+- Face authentication is refused for: remote sessions (`PAM_RHOST` set: SSH direct login), any process running inside an SSH session (detected by walking the process ancestor chain for `sshd`), and non-interactive processes (no `/dev/tty`, no `DISPLAY`/`WAYLAND_DISPLAY` in environment, and no active login session at `/run/systemd/users/<uid>`): cron jobs, systemd services, background scripts; all return `AUTHINFO_UNAVAIL` without contacting the daemon
 
 ## License
 

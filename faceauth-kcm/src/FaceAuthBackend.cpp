@@ -5,6 +5,13 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QProcess>
+#include <QFileInfo>
+#include <QGuiApplication>
+
+#include <KAuth/Action>
+#include <KAuth/ActionReply>
+#include <KAuth/ExecuteJob>
+#include <KJob>
 
 #include <pwd.h>
 #include <unistd.h>
@@ -101,6 +108,50 @@ void FaceAuthBackend::setLastError(const QString &err)
     Q_EMIT lastErrorChanged();
 }
 
+void FaceAuthBackend::withAuth(std::function<void()> onGranted)
+{
+    KAuth::Action action(QStringLiteral("org.faceauth.manage"));
+    // The PolkitQt1 backend requires a registered helper; setHelperId wires up
+    // D-Bus activation of faceauth-auth-helper, which shows the polkit dialog.
+    action.setHelperId(QStringLiteral("org.faceauth"));
+    // polkit-1 requires an explicit parent window to display the auth dialog.
+    action.setParentWindow(QGuiApplication::focusWindow());
+    KAuth::ExecuteJob *job = action.execute();
+    connect(job, &KJob::result, this,
+            [this, onGranted = std::move(onGranted)](KJob *j) {
+                if (!j->error()) {
+                    onGranted();
+                } else if (j->error() != KAuth::ActionReply::UserCancelledError) {
+                    setLastError(j->errorString());
+                }
+            });
+    job->start();
+}
+
+// Resolve a camera ID string ("/dev/videoN" or a by-path/by-id symlink name)
+// to a numeric /dev/videoN index.
+static int resolveCameraId(const QString &id)
+{
+    if (id.startsWith(QLatin1String("/dev/video"))) {
+        bool ok;
+        const int idx = id.mid(10).toInt(&ok);
+        if (ok)
+            return idx;
+    }
+    // Resolve as a by-path or by-id symlink.
+    for (const char *dir : {"/dev/v4l/by-path/", "/dev/v4l/by-id/"}) {
+        const QFileInfo fi(QString::fromLatin1(dir) + id);
+        const QString target = fi.canonicalFilePath();
+        if (target.startsWith(QLatin1String("/dev/video"))) {
+            bool ok;
+            const int idx = target.mid(10).toInt(&ok);
+            if (ok)
+                return idx;
+        }
+    }
+    return 0;
+}
+
 void FaceAuthBackend::parseModelJson(const QString &rawJson)
 {
     const QJsonDocument doc = QJsonDocument::fromJson(rawJson.toUtf8());
@@ -108,8 +159,9 @@ void FaceAuthBackend::parseModelJson(const QString &rawJson)
 
     m_batchCount = root.value(QLatin1String("encodings")).toArray().size();
 
-    const QJsonObject cam = root.value(QLatin1String("camera")).toObject();
-    m_cameraIndex = cam.value(QLatin1String("index")).toInt();
+    // camera is now a plain string: a by-path ID or "/dev/videoN" fallback.
+    const QString cameraId = root.value(QLatin1String("camera")).toString();
+    m_cameraIndex = resolveCameraId(cameraId);
 
     Q_EMIT modelChanged();
 }
@@ -168,22 +220,25 @@ void FaceAuthBackend::setServiceOpt(const QString &service, bool allowed)
 {
     if (service.trimmed().isEmpty())
         return;
-    setBusy(true);
-    FaceAuthDaemon::send(
-        QJsonObject{{QLatin1String("op"),      QLatin1String("SetOpt")},
-                    {QLatin1String("username"), m_username},
-                    {QLatin1String("service"),  service.trimmed()},
-                    {QLatin1String("allowed"),  allowed}},
-        [this](bool ok, const QString &err, const QVariant &, bool connectionError) {
-            setBusy(false);
-            checkAvailability(ok, connectionError);
-            if (ok)
-                getServices();
-            else if (!connectionError)
-                setLastError(err);
-        },
-        FaceAuthDaemon::QUICK_TIMEOUT_MS,
-        this);
+    const QString trimmed = service.trimmed();
+    withAuth([this, trimmed, allowed]() {
+        setBusy(true);
+        FaceAuthDaemon::send(
+            QJsonObject{{QLatin1String("op"),      QLatin1String("SetOpt")},
+                        {QLatin1String("username"), m_username},
+                        {QLatin1String("service"),  trimmed},
+                        {QLatin1String("allowed"),  allowed}},
+            [this](bool ok, const QString &err, const QVariant &, bool connectionError) {
+                setBusy(false);
+                checkAvailability(ok, connectionError);
+                if (ok)
+                    getServices();
+                else if (!connectionError)
+                    setLastError(err);
+            },
+            FaceAuthDaemon::QUICK_TIMEOUT_MS,
+            this);
+    });
 }
 
 void FaceAuthBackend::getServices()
@@ -207,10 +262,12 @@ void FaceAuthBackend::getServices()
 
 void FaceAuthBackend::clearAll()
 {
-    // index: null removes the entire model.
-    sendAndRefresh(QJsonObject{{QLatin1String("op"), QLatin1String("Clear")},
-                               {QLatin1String("username"), m_username},
-                               {QLatin1String("index"), QJsonValue::Null}});
+    withAuth([this]() {
+        // index: null removes the entire model.
+        sendAndRefresh(QJsonObject{{QLatin1String("op"), QLatin1String("Clear")},
+                                   {QLatin1String("username"), m_username},
+                                   {QLatin1String("index"), QJsonValue::Null}});
+    });
 }
 
 // --- Desktop notification helpers ---
@@ -304,14 +361,15 @@ void FaceAuthBackend::startEnrollment(int cameraIndex)
     if (m_enrolling || m_busy)
         return;
 
-    m_cameraIndex = cameraIndex;
-    m_capturesDone = 0;
-    m_capturedEncodings.clear();
-    m_enrolling = true;
-    Q_EMIT enrollingChanged();
-    Q_EMIT capturesDoneChanged();
-
-    captureOne();
+    withAuth([this, cameraIndex]() {
+        m_cameraIndex = cameraIndex;
+        m_capturesDone = 0;
+        m_capturedEncodings.clear();
+        m_enrolling = true;
+        Q_EMIT enrollingChanged();
+        Q_EMIT capturesDoneChanged();
+        captureOne();
+    });
 }
 
 void FaceAuthBackend::cancelEnrollment()

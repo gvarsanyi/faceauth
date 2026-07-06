@@ -235,6 +235,11 @@ KCMUtils.SimpleKCM {
 
             Controls.Label {
                 Kirigami.FormData.label: i18n("Always ignored:")
+                text: i18n("Non-interactive (background) processes")
+                enabled: false
+            }
+
+            Controls.Label {
                 text: i18n("SSH sessions (including sudo within SSH)")
                 enabled: false
             }

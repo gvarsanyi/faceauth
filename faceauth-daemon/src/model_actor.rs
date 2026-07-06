@@ -66,16 +66,16 @@ fn do_load(username: &str) -> Result<String, String> {
 fn do_enroll(username: &str, camera_index: u32, batch: Vec<[f32; 128]>) -> Result<(), String> {
     let uid = faceauth_core::uid_for_username(username)
         .ok_or_else(|| format!("unknown user '{}'", username))?;
-    let camera_id = faceauth_core::camera::camera_id_for_index(camera_index);
+    let camera_id = faceauth_core::camera_id_for_index(camera_index);
     let mut face_model = model::load_or_create_model(username, camera_id.clone()).map_err(|e| e.to_string())?;
     if face_model.encodings.is_empty() {
         // No encodings — camera cleared or brand-new model; accept whichever
         // camera is being used and update the stored camera metadata.
         face_model.camera = camera_id;
-    } else if face_model.camera.index != camera_index {
+    } else if face_model.camera != camera_id {
         return Err(format!(
-            "model already uses /dev/video{}; use 'faceauth clear' first to change cameras",
-            face_model.camera.index
+            "model already uses {}; use 'faceauth clear' first to change cameras",
+            face_model.camera
         ));
     }
     face_model.add_batch(batch);
@@ -85,29 +85,29 @@ fn do_enroll(username: &str, camera_index: u32, batch: Vec<[f32; 128]>) -> Resul
 fn do_clear(username: &str, index: Option<usize>) -> Result<(), String> {
     let uid = faceauth_core::uid_for_username(username)
         .ok_or_else(|| format!("unknown user '{}'", username))?;
+    let path = model::model_path(uid);
 
-    // If no model file exists there is nothing to clear.
-    if !model::model_path(uid).exists() {
+    if !path.exists() {
         return Ok(());
     }
 
+    let Some(i) = index else {
+        // Full clear: remove the file entirely.
+        return std::fs::remove_file(&path).map_err(|e| e.to_string());
+    };
+
     let mut face_model = model::load_model(username).map_err(|e| e.to_string())?;
-
-    match index {
-        None => {
-            face_model.encodings.clear();
-        }
-        Some(i) => {
-            if i >= face_model.encodings.len() {
-                return Err(format!(
-                    "batch index {} out of range (have {})",
-                    i, face_model.encodings.len()
-                ));
-            }
-            face_model.encodings.remove(i);
-        }
+    if i >= face_model.encodings.len() {
+        return Err(format!(
+            "batch index {} out of range (have {})",
+            i, face_model.encodings.len()
+        ));
     }
+    face_model.encodings.remove(i);
 
-    // Save back — preserves disabled flag and camera metadata.
-    model::save_model(uid, &face_model).map_err(|e| e.to_string())
+    if face_model.encodings.is_empty() {
+        std::fs::remove_file(&path).map_err(|e| e.to_string())
+    } else {
+        model::save_model(uid, &face_model).map_err(|e| e.to_string())
+    }
 }

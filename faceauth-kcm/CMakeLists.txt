@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(faceauth-kcm VERSION 0.8.0 LANGUAGES CXX)
+project(faceauth-kcm VERSION 0.9.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -13,7 +13,7 @@ include(KDECMakeSettings)
 include(KDECompilerSettings NO_POLICY_SCOPE)
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Quick Qml Network QuickControls2)
-find_package(KF6 6.0 REQUIRED COMPONENTS CoreAddons KCMUtils I18n)
+find_package(KF6 6.0 REQUIRED COMPONENTS CoreAddons KCMUtils I18n Auth)
 
 add_subdirectory(src)
 

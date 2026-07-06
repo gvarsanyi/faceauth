@@ -3,6 +3,12 @@
 .cache
 .claude
 CLAUDE.md
+packaging
+
+# Packaging artifacts
+/dist/
+/packaging/staging-kde/
+/packaging/locale/
 
 # dlib pre-trained model files — downloaded automatically by build.rs.
 # Never commit these; they are large binary files (~31 MB combined).

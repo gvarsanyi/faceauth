@@ -13,3 +13,5 @@ clap = { workspace = true }
 serde_json = { workspace = true }
 libc = "0.2"
 gettext-rs = { workspace = true }
+pam = "0.7"
+rpassword = "7"

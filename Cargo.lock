@@ -701,18 +701,20 @@ dependencies = [
 
 [[package]]
 name = "faceauth-cli"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "clap",
  "faceauth-core",
  "gettext-rs",
  "libc",
+ "pam",
+ "rpassword",
  "serde_json",
 ]
 
 [[package]]
 name = "faceauth-core"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "bzip2",
  "dlib-face-recognition",
@@ -726,7 +728,7 @@ dependencies = [
 
 [[package]]
 name = "faceauth-daemon"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "faceauth-core",
  "libc",
@@ -735,7 +737,7 @@ dependencies = [
 
 [[package]]
 name = "faceauth-notify"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "gettext-rs",
  "notify-rust",
@@ -743,7 +745,7 @@ dependencies = [
 
 [[package]]
 name = "faceauth-pam"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "faceauth-core",
  "libc",
@@ -1353,6 +1355,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "pam"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa2bdc959c201c047004a1420a92aaa1dd1a6b64d5ef333aa3a4ac764fb93097"
+dependencies = [
+ "libc",
+ "pam-sys",
+ "users",
+]
+
+[[package]]
+name = "pam-sys"
+version = "0.5.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd4858311a097f01a0006ef7d0cd50bca81ec430c949d7bf95cbefd202282434"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "pamsm"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1519,6 +1541,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c6a884d2998352bb4daf0183589aec883f16a6da1f4dde84d8e2e9a5409a1ce"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "rpassword"
+version = "7.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "66d4c8b64f049c6721ec8ccec37ddfc3d641c4a7fca57e8f2a89de509c73df39"
+dependencies = [
+ "libc",
+ "rtoolbox",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "rtoolbox"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7cc970b249fbe527d6e02e0a227762c9108b2f49d81094fe357ffc6d14d7f6f"
+dependencies = [
+ "libc",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1832,6 +1875,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
+name = "users"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7fed7d0912567d35f88010c23dbaf865e9da8b5227295e8dc0f2fdd109155ab7"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "utf8parse"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2141,6 +2193,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7837d08f69c77cf6b07689544538e017c1bfcf57e34b4c0ff58e6c2cd3b37091"
 dependencies = [
  "windows-link 0.2.1",
+]
+
+[[package]]
+name = "windows-sys"
+version = "0.52.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
+dependencies = [
+ "windows-targets",
 ]
 
 [[package]]

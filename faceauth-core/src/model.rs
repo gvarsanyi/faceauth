@@ -10,24 +10,30 @@ use crate::error::{FaceAuthError, Result};
 
 /// A stable identifier for a V4L2 camera device.
 ///
-/// Rather than storing a raw integer index (which changes as devices are
-/// plugged/unplugged), we store udev's stable symlink names from
-/// `/dev/v4l/by-id/` and `/dev/v4l/by-path/`. At open time the symlink is
-/// resolved back to a `/dev/videoN` index. The integer index is kept as a
-/// last-resort fallback for cameras that have no udev entries.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CameraId {
-    /// Symlink name from `/dev/v4l/by-id/`, e.g.
-    /// `"usb-046d_Logitech_Webcam_C930e_12345678-video-index0"`.
-    /// Stable across port changes; absent for cameras with no serial number.
-    pub by_id: Option<String>,
-    /// Symlink name from `/dev/v4l/by-path/`, e.g.
-    /// `"pci-0000:00:14.0-usb-0:2:1.0-video-index0"`.
-    /// Stable as long as the device stays on the same physical port.
-    pub by_path: Option<String>,
-    /// Raw V4L2 device index (`N` in `/dev/videoN`). Used as a last-resort
-    /// fallback when neither `by_id` nor `by_path` can be resolved.
-    pub index: u32,
+/// Stored as the udev by-path symlink name from `/dev/v4l/by-path/`, e.g.
+/// `"pci-0000:00:14.0-usb-0:2:1.0-video-index0"`. Falls back to the
+/// by-id name or `"/dev/videoN"` if by-path is unavailable.
+/// At open time the name is resolved back to a `/dev/videoN` index.
+pub type CameraId = String;
+
+/// Deserialize a `CameraId` from either the current plain-string format or
+/// the legacy `{"by_id":…,"by_path":…,"index":…}` object format.
+fn deserialize_camera_id<'de, D>(deserializer: D) -> std::result::Result<CameraId, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Compat {
+        String(String),
+        Legacy { by_path: Option<String>, by_id: Option<String>, index: u32 },
+    }
+    Ok(match Compat::deserialize(deserializer)? {
+        Compat::String(s) => s,
+        Compat::Legacy { by_path: Some(p), .. } => p,
+        Compat::Legacy { by_id: Some(id), .. } => id,
+        Compat::Legacy { index, .. } => format!("/dev/video{index}"),
+    })
 }
 
 /// Look up the numeric UID for a username via `getpwnam`.
@@ -103,6 +109,7 @@ fn encoding_from_hex(s: &str) -> std::result::Result<[f32; 128], String> {
 /// Each inner Vec is one enrollment batch (e.g. 5 captures in one `faceauth add` run).
 #[derive(Debug, Serialize, Deserialize)]
 struct FaceModelDisk {
+    #[serde(deserialize_with = "deserialize_camera_id")]
     camera: CameraId,
     encodings: Vec<Vec<String>>,
 }
@@ -135,7 +142,7 @@ impl FaceModel {
 /// Derive the model file path for a given UID.
 /// UIDs are numeric so there is no path traversal risk.
 pub fn model_path(uid: u32) -> PathBuf {
-    PathBuf::from(MODEL_DIR).join(format!("{}.json", uid))
+    PathBuf::from(MODEL_DIR).join(format!("{}.enc.json", uid))
 }
 
 /// Deserialize a `FaceModel` from a JSON string (as returned by the daemon).
@@ -421,9 +428,9 @@ mod tests {
     #[test]
     fn model_path_uses_uid() {
         let p = model_path(1000);
-        assert_eq!(p, PathBuf::from("/etc/security/faceauth/1000.json"));
+        assert_eq!(p, PathBuf::from("/etc/security/faceauth/1000.enc.json"));
         let p2 = model_path(0);
-        assert_eq!(p2, PathBuf::from("/etc/security/faceauth/0.json"));
+        assert_eq!(p2, PathBuf::from("/etc/security/faceauth/0.enc.json"));
     }
 
     #[test]
@@ -437,11 +444,7 @@ mod tests {
 
     #[test]
     fn face_model_roundtrip() {
-        let camera = CameraId {
-            by_id: Some("usb-046d_Webcam_ABCDEF-video-index0".to_string()),
-            by_path: Some("pci-0000:00:14.0-usb-0:2:1.0-video-index0".to_string()),
-            index: 2,
-        };
+        let camera = "pci-0000:00:14.0-usb-0:2:1.0-video-index0".to_string();
         let mut model = FaceModel::new(camera);
         let enc = [0.1f32; 128];
         model.add_batch(vec![enc]);
@@ -460,8 +463,7 @@ mod tests {
             .map(|batch| batch.into_iter().map(|s| encoding_from_hex(&s).unwrap()).collect())
             .collect();
 
-        assert_eq!(loaded_disk.camera.index, 2);
-        assert_eq!(loaded_disk.camera.by_id.as_deref(), Some("usb-046d_Webcam_ABCDEF-video-index0"));
+        assert_eq!(loaded_disk.camera, "pci-0000:00:14.0-usb-0:2:1.0-video-index0");
         assert_eq!(loaded_encodings.len(), 1);
         assert_eq!(loaded_encodings[0].len(), 1);
         assert_eq!(loaded_encodings[0][0], enc);
@@ -469,10 +471,28 @@ mod tests {
 
     #[test]
     fn face_model_new_initial_state() {
-        let camera = CameraId { by_id: None, by_path: None, index: 3 };
-        let model = FaceModel::new(camera);
-        assert_eq!(model.camera.index, 3);
+        let camera = "pci-0000:00:14.0-usb-0:2:1.0-video-index0".to_string();
+        let model = FaceModel::new(camera.clone());
+        assert_eq!(model.camera, camera);
         assert!(model.encodings.is_empty());
+    }
+
+    #[test]
+    fn face_model_legacy_struct_deserializes() {
+        // by_path present: use it
+        let json = r#"{"camera":{"by_id":"usb-foo","by_path":"pci-bar","index":2},"encodings":[]}"#;
+        let disk: FaceModelDisk = serde_json::from_str(json).unwrap();
+        assert_eq!(disk.camera, "pci-bar");
+
+        // no by_path: fall back to by_id
+        let json = r#"{"camera":{"by_id":"usb-foo","by_path":null,"index":2},"encodings":[]}"#;
+        let disk: FaceModelDisk = serde_json::from_str(json).unwrap();
+        assert_eq!(disk.camera, "usb-foo");
+
+        // neither: fall back to /dev/videoN
+        let json = r#"{"camera":{"by_id":null,"by_path":null,"index":2},"encodings":[]}"#;
+        let disk: FaceModelDisk = serde_json::from_str(json).unwrap();
+        assert_eq!(disk.camera, "/dev/video2");
     }
 
     /// Legacy JSON containing `version`, `disabled`, and `ignore` deserializes
@@ -485,8 +505,7 @@ mod tests {
 
     #[test]
     fn load_model_from_json_roundtrip() {
-        let camera = CameraId { by_id: None, by_path: None, index: 0 };
-        let mut model = FaceModel::new(camera);
+        let mut model = FaceModel::new("pci-0000:00:14.0-usb-0:1:1.0-video-index0".to_string());
         let enc = [0.25f32; 128];
         model.add_batch(vec![enc]);
 

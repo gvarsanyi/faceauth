@@ -25,6 +25,7 @@ target_link_libraries(kcm_faceauth PRIVATE
     KF6::CoreAddons
     KF6::KCMUtils
     KF6::I18n
+    KF6::AuthCore
 )
 target_compile_definitions(kcm_faceauth PRIVATE
     FACEAUTH_LIBEXEC_DIR="${FACEAUTH_LIBEXEC_DIR}"
@@ -62,8 +63,17 @@ target_link_libraries(faceauth-gui PRIVATE
     Qt6::QuickControls2
     KF6::CoreAddons
     KF6::I18n
+    KF6::AuthCore
 )
 target_compile_definitions(faceauth-gui PRIVATE
     FACEAUTH_LIBEXEC_DIR="${FACEAUTH_LIBEXEC_DIR}"
 )
 install(TARGETS faceauth-gui DESTINATION ${KDE_INSTALL_BINDIR})
+
+# --- KAuth polkit helper ---
+# The PolkitQt1 backend requires a registered helper binary for every action.
+# This helper does nothing privileged; the real work goes through the daemon.
+add_executable(faceauth-auth-helper faceauth_auth_helper.cpp)
+target_link_libraries(faceauth-auth-helper PRIVATE Qt6::Core KF6::AuthCore)
+kauth_install_helper_files(faceauth-auth-helper org.faceauth root)
+install(TARGETS faceauth-auth-helper DESTINATION ${KAUTH_HELPER_INSTALL_DIR})

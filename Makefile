@@ -1,7 +1,6 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
-CMAKE := cmake
 MSGFMT := $(shell command -v msgfmt 2>/dev/null || true)
 NPROC := $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
 
@@ -29,13 +28,32 @@ endif
 LIBEXEC_DIR := $(if $(wildcard /usr/libexec),/usr/libexec,/usr/lib)
 export FACEAUTH_LIBEXEC_DIR := $(LIBEXEC_DIR)
 
-.PHONY: all build cli daemon notify pam kcm gui install-kcm clean clean-kcm distclean install uninstall help
+POLKIT_ACTIONS_DIR := /usr/share/polkit-1/actions
+
+# --- Packaging (nfpm) ---
+VERSION        := $(shell grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+DIST_DIR       := dist
+STAGING_KDE    := packaging/staging-kde
+# Architecture string for nfpm (amd64, arm64, ...).  Override with NFPM_ARCH=arm64 make deb.
+NFPM_ARCH      ?= $(shell dpkg --print-architecture 2>/dev/null \
+                    || rpm --eval '%{_arch}' 2>/dev/null | sed 's/x86_64/amd64/;s/aarch64/arm64/' \
+                    || echo amd64)
+# PAM module directory used in the packages (distro-specific).
+# DEB: multiarch path (requires dpkg-architecture, falls back to x86_64-linux-gnu).
+# RPM: /usr/lib64/security on Fedora/RHEL x86_64, /usr/lib/security on openSUSE.
+DEB_PAM_MOD_DIR := /usr/lib/$(shell dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null \
+                       || echo x86_64-linux-gnu)/security
+RPM_PAM_MOD_DIR := $(firstword $(wildcard /usr/lib64/security /usr/lib/security) /usr/lib/security)
+
+.PHONY: all build cli daemon notify pam kcm gui install-kcm \
+        compile-po staging-kde deb rpm package \
+        clean clean-kcm distclean install uninstall help
 
 all: build
 
 build:
 	cargo build --release --manifest-path Cargo.toml
-	$(MAKE) kcm
+	make kcm
 
 cli:
 	cargo build --release --manifest-path Cargo.toml --package faceauth-cli --bin faceauth
@@ -57,6 +75,53 @@ kcm gui:
 install-kcm:
 	cmake --install $(BUILD_KCM_DIR)
 	./install-kde.sh
+	install -m 644 $(KCM_SOURCE)/org.faceauth.policy $(POLKIT_ACTIONS_DIR)/org.faceauth.policy
+
+compile-po:
+	@if [ -z "$(MSGFMT)" ]; then \
+	    echo "msgfmt not found -- skipping translations"; \
+	else \
+	    for po in po/*.po; do \
+	        [ -f "$$po" ] || continue; \
+	        lang=$$(basename "$$po" .po); \
+	        mkdir -p packaging/locale/$$lang/LC_MESSAGES; \
+	        $(MSGFMT) -o packaging/locale/$$lang/LC_MESSAGES/faceauth.mo "$$po"; \
+	    done; \
+	fi
+
+staging-kde: kcm
+	rm -rf $(STAGING_KDE)
+	@touch $(BUILD_KCM_DIR)/install_manifest.txt 2>/dev/null || \
+	    sudo chown "$(shell id -u):$(shell id -g)" $(BUILD_KCM_DIR)/install_manifest.txt
+	DESTDIR=$(abspath $(STAGING_KDE)) cmake --install $(BUILD_KCM_DIR)
+	install -D -m 644 $(KCM_SOURCE)/org.faceauth.policy \
+	    $(STAGING_KDE)/usr/share/polkit-1/actions/org.faceauth.policy
+
+deb: build compile-po staging-kde
+	@command -v nfpm >/dev/null 2>&1 || { echo "nfpm not found -- install from https://nfpm.goreleaser.com"; exit 1; }
+	mkdir -p $(DIST_DIR)
+	FACEAUTH_VERSION=$(VERSION) \
+	FACEAUTH_LIBEXEC_DIR=/usr/libexec \
+	FACEAUTH_PAM_MOD_DIR=$(DEB_PAM_MOD_DIR) \
+	NFPM_ARCH=$(NFPM_ARCH) \
+	nfpm package -f packaging/nfpm-main.yaml -t $(DIST_DIR) -p deb
+	FACEAUTH_VERSION=$(VERSION) \
+	NFPM_ARCH=$(NFPM_ARCH) \
+	nfpm package -f packaging/nfpm-kde.yaml -t $(DIST_DIR) -p deb
+
+rpm: build compile-po staging-kde
+	@command -v nfpm >/dev/null 2>&1 || { echo "nfpm not found -- install from https://nfpm.goreleaser.com"; exit 1; }
+	mkdir -p $(DIST_DIR)
+	FACEAUTH_VERSION=$(VERSION) \
+	FACEAUTH_LIBEXEC_DIR=/usr/libexec \
+	FACEAUTH_PAM_MOD_DIR=$(RPM_PAM_MOD_DIR) \
+	NFPM_ARCH=$(NFPM_ARCH) \
+	nfpm package -f packaging/nfpm-main.yaml -t $(DIST_DIR) -p rpm
+	FACEAUTH_VERSION=$(VERSION) \
+	NFPM_ARCH=$(NFPM_ARCH) \
+	nfpm package -f packaging/nfpm-kde.yaml -t $(DIST_DIR) -p rpm
+
+package: deb rpm
 
 install:
 	@command -v systemctl >/dev/null 2>&1 || { echo "systemctl is required to install faceauth"; exit 1; }
@@ -91,7 +156,7 @@ install:
 	# Install PAM configuration
 	./install-pam.sh
 	# Install KDE plugin & KCM
-	$(MAKE) install-kcm
+	make install-kcm
 	@echo ""
 	@echo "Done. faceauth-daemon is running."
 	@echo "Enroll your face with:"
@@ -118,7 +183,7 @@ uninstall:
 
 clean:
 	cargo clean
-	rm -rf $(BUILD_KCM_DIR)
+	rm -rf $(BUILD_KCM_DIR) $(STAGING_KDE) packaging/locale $(DIST_DIR)
 
 help:
 	@echo "Common targets:"
@@ -131,4 +196,11 @@ help:
 	@echo "  make kcm        Configure & build the KDE System Settings module"
 	@echo "  make install    Install faceauth"
 	@echo "  make uninstall  Remove installed files"
-	@echo "  make clean      Clean Cargo artifacts & CMake build directory"
+	@echo "  make clean      Clean Cargo artifacts, CMake build dir, and packaging artifacts"
+	@echo ""
+	@echo "Packaging targets (require nfpm: https://nfpm.goreleaser.com):"
+	@echo "  make deb        Build faceauth and faceauth-kde .deb packages -> dist/"
+	@echo "  make rpm        Build faceauth and faceauth-kde .rpm packages -> dist/"
+	@echo "  make package    Build both deb and rpm packages"
+	@echo ""
+	@echo "  NFPM_ARCH=arm64 make deb   Override target architecture"

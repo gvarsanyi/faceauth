@@ -19,6 +19,6 @@ fn main() {
         .unwrap_or_else(|e| panic!("Failed to run generate.sh: {e}"));
 
     if !status.success() {
-        panic!("generate.sh failed — ensure ImageMagick is installed (magick command)");
+        panic!("generate.sh failed -- ensure rsvg-convert (librsvg) and ImageMagick are installed");
     }
 }

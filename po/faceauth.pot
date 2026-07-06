@@ -118,15 +118,7 @@ msgid "UID"
 msgstr ""
 
 #: faceauth-cli/src/main.rs
-msgid "Camera index"
-msgstr ""
-
-#: faceauth-cli/src/main.rs
-msgid "Camera by-id"
-msgstr ""
-
-#: faceauth-cli/src/main.rs
-msgid "Camera by-path"
+msgid "Camera"
 msgstr ""
 
 #: faceauth-cli/src/main.rs

@@ -124,6 +124,21 @@ fn daemon_request(req: &Request) -> Option<Response> {
     serde_json::from_str(line.trim()).ok()
 }
 
+/// Prompt for the current user's password and verify it via PAM.
+///
+/// Skipped silently when running as root. Returns an error string on failure
+/// (wrong password, PAM error, or I/O error reading the terminal).
+fn verify_password(username: &str) -> Result<(), String> {
+    if unsafe { libc::getuid() } == 0 {
+        return Ok(());
+    }
+    let password = rpassword::prompt_password(format!("[faceauth] Password for {username}: "))
+        .map_err(|e| e.to_string())?;
+    let mut auth = pam::Authenticator::with_password("passwd").map_err(|e| e.to_string())?;
+    auth.get_handler().set_credentials(username, password);
+    auth.authenticate().map_err(|_| "authentication failed".to_string())
+}
+
 /// Return true if the error string means the user has no enrolled model.
 ///
 /// Two distinct messages are possible: the daemon's own "no model enrolled for"
@@ -135,7 +150,6 @@ fn is_model_not_found(e: &str) -> bool {
 /// Fetch a user's model via the daemon.
 ///
 /// Returns `Ok(model)` on success, or an error string on failure.
-/// Falls back to a direct disk read if the daemon socket is unavailable.
 fn load_model(username: &str) -> Result<FaceModel, String> {
     let req = Request::LoadModel {
         username: username.to_string(),
@@ -144,10 +158,7 @@ fn load_model(username: &str) -> Result<FaceModel, String> {
         Some(Response::Model { json }) => load_model_from_json(&json).map_err(|e| e.to_string()),
         Some(Response::Err { message }) => Err(message),
         Some(_) => Err("unexpected response from daemon".to_string()),
-        None => {
-            // Daemon not available — try direct read (works if root or 751 dir).
-            faceauth_core::model::load_model(username).map_err(|e| e.to_string())
-        }
+        None => Err("daemon not available".to_string()),
     }
 }
 
@@ -178,6 +189,16 @@ fn notify_result(uid: u32, notif_id: u32, success: bool) {
     let _ = cmd.spawn();
 }
 
+/// Exit with a message for the two error arms that are identical across every
+/// daemon `match`: unexpected response type and daemon not available.
+fn unexpected_or_unavailable(resp: Option<Response>) -> ! {
+    match resp {
+        None => eprintln!("faceauth: daemon not available"),
+        _ => eprintln!("faceauth: {}", gettext("unexpected response from daemon")),
+    }
+    process::exit(1);
+}
+
 fn main() {
     gettextrs::setlocale(gettextrs::LocaleCategory::LcAll, "");
     gettextrs::bindtextdomain("faceauth", "/usr/share/locale").expect("failed to bind text domain");
@@ -203,6 +224,11 @@ fn main() {
 
     match cli.command {
         Commands::Add { timeout, camera } => {
+            if let Err(e) = verify_password(&username) {
+                eprintln!("faceauth: {e}");
+                process::exit(1);
+            }
+
             const COUNT: u32 = 5;
 
             // If a model already exists, its stored camera is authoritative.
@@ -210,20 +236,20 @@ fn main() {
             // camera is used directly (no interactive prompt on subsequent adds).
             let camera_index = match load_model(&username) {
                 Ok(existing) => {
-                    let stored = existing.camera.index;
+                    let stored_index = faceauth_core::resolve_camera_to_index(&existing.camera);
                     if let Some(cam_arg) = camera {
                         let given = camera::resolve_add_camera(Some(cam_arg));
-                        if given != stored {
+                        if given != stored_index {
                             eprintln!(
                                 "faceauth: {}",
-                                gettext("'{user}' is already enrolled with /dev/video{camera}; omit --camera to add another batch, or run 'faceauth clear' first to change cameras")
+                                gettext("'{user}' is already enrolled with {camera}; omit --camera to add another batch, or run 'faceauth clear' first to change cameras")
                                     .replace("{user}", &username)
-                                    .replace("{camera}", &stored.to_string())
+                                    .replace("{camera}", &existing.camera)
                             );
                             process::exit(1);
                         }
                     }
-                    stored
+                    stored_index
                 }
                 Err(ref e) if is_model_not_found(e) => camera::resolve_add_camera(camera),
                 Err(e) => {
@@ -232,9 +258,21 @@ fn main() {
                 }
             };
 
+            let camera_name = camera_name_for_index(camera_index);
+            let camera_display = if camera_name.is_empty() {
+                faceauth_core::camera_id_for_index(camera_index)
+            } else {
+                camera_name
+            };
             eprintln!(
                 "faceauth: {}",
                 gettext("enrolling face for '{user}'").replace("{user}", &username)
+            );
+            eprintln!(
+                "faceauth: {}",
+                gettext("'{user}' please look at the camera ({camera}) ...")
+                    .replace("{user}", &username)
+                    .replace("{camera}", &camera_display)
             );
 
             // Encodings captured so far this session, used to reject poses
@@ -355,14 +393,7 @@ fn main() {
                     );
                     process::exit(1);
                 }
-                Some(_) => {
-                    eprintln!("faceauth: {}", gettext("unexpected response from daemon"));
-                    process::exit(1);
-                }
-                None => {
-                    eprintln!("faceauth: daemon not available");
-                    process::exit(1);
-                }
+                resp => unexpected_or_unavailable(resp),
             }
 
             println!(
@@ -390,23 +421,12 @@ fn main() {
                     eprintln!("faceauth: {}", message);
                     process::exit(1);
                 }
-                Some(_) => {
-                    eprintln!("faceauth: {}", gettext("unexpected response from daemon"));
-                    process::exit(1);
-                }
-                None => {
-                    eprintln!("faceauth: daemon not available");
-                    process::exit(1);
-                }
+                resp => unexpected_or_unavailable(resp),
             };
 
-            let camera_index = face_model.camera.index;
+            let camera_index = faceauth_core::resolve_camera_to_index(&face_model.camera);
             let camera_name = camera_name_for_index(camera_index);
-            let camera_display = if camera_name.is_empty() {
-                format!("/dev/video{camera_index}")
-            } else {
-                format!("{camera_name} at /dev/video{camera_index}")
-            };
+            let camera_display = if camera_name.is_empty() { face_model.camera.clone() } else { camera_name };
             eprintln!(
                 "faceauth: {}",
                 gettext("'{user}' please look at the camera ({camera}) ...")
@@ -441,18 +461,15 @@ fn main() {
                     );
                     process::exit(1);
                 }
-                Some(_) => {
-                    eprintln!("faceauth: {}", gettext("unexpected response from daemon"));
-                    process::exit(1);
-                }
-                None => {
-                    eprintln!("faceauth: daemon not available");
-                    process::exit(1);
-                }
+                resp => unexpected_or_unavailable(resp),
             }
         }
 
         Commands::Clear { index } => {
+            if let Err(e) = verify_password(&username) {
+                eprintln!("faceauth: {e}");
+                process::exit(1);
+            }
             let req = Request::Clear {
                 username: username.clone(),
                 index,
@@ -472,14 +489,7 @@ fn main() {
                     );
                     process::exit(1);
                 }
-                Some(_) => {
-                    eprintln!("faceauth: {}", gettext("unexpected response from daemon"));
-                    process::exit(1);
-                }
-                None => {
-                    eprintln!("faceauth: daemon not available");
-                    process::exit(1);
-                }
+                resp => unexpected_or_unavailable(resp),
             }
         }
 
@@ -496,18 +506,7 @@ fn main() {
             if let Some(uid) = faceauth_core::uid_for_username(&username) {
                 println!("{}: {}", gettext("UID"), uid);
             }
-            println!(
-                "{}: {} (/dev/video{})",
-                gettext("Camera index"),
-                model.camera.index,
-                model.camera.index
-            );
-            if let Some(ref by_id) = model.camera.by_id {
-                println!("{}: {}", gettext("Camera by-id"), by_id);
-            }
-            if let Some(ref by_path) = model.camera.by_path {
-                println!("{}: {}", gettext("Camera by-path"), by_path);
-            }
+            println!("{}: {}", gettext("Camera"), model.camera);
             println!("{}: {}", gettext("Batches"), model.encodings.len());
         }
 
@@ -520,6 +519,10 @@ fn main() {
         }
 
         Commands::Ignore { requestor } => {
+            if let Err(e) = verify_password(&username) {
+                eprintln!("faceauth: {e}");
+                process::exit(1);
+            }
             let req = Request::SetOpt {
                 username: username.clone(),
                 service: requestor.clone(),
@@ -538,18 +541,15 @@ fn main() {
                     eprintln!("faceauth: {}", message);
                     process::exit(1);
                 }
-                Some(_) => {
-                    eprintln!("faceauth: {}", gettext("unexpected response from daemon"));
-                    process::exit(1);
-                }
-                None => {
-                    eprintln!("faceauth: daemon not available");
-                    process::exit(1);
-                }
+                resp => unexpected_or_unavailable(resp),
             }
         }
 
         Commands::Unignore { requestor } => {
+            if let Err(e) = verify_password(&username) {
+                eprintln!("faceauth: {e}");
+                process::exit(1);
+            }
             let req = Request::SetOpt {
                 username: username.clone(),
                 service: requestor.clone(),
@@ -568,14 +568,7 @@ fn main() {
                     eprintln!("faceauth: {}", message);
                     process::exit(1);
                 }
-                Some(_) => {
-                    eprintln!("faceauth: {}", gettext("unexpected response from daemon"));
-                    process::exit(1);
-                }
-                None => {
-                    eprintln!("faceauth: daemon not available");
-                    process::exit(1);
-                }
+                resp => unexpected_or_unavailable(resp),
             }
         }
 
@@ -596,14 +589,7 @@ fn main() {
                     eprintln!("faceauth: {}", message);
                     process::exit(1);
                 }
-                Some(_) => {
-                    eprintln!("faceauth: {}", gettext("unexpected response from daemon"));
-                    process::exit(1);
-                }
-                None => {
-                    eprintln!("faceauth: daemon not available");
-                    process::exit(1);
-                }
+                resp => unexpected_or_unavailable(resp),
             }
         }
     }

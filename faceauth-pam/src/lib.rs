@@ -37,16 +37,7 @@ fn is_remote_session(pamh: &Pam) -> bool {
 
 /// Return the name of the calling process's parent by reading /proc.
 fn parent_process_name() -> Option<String> {
-    let ppid = std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .find(|l| l.starts_with("PPid:"))?
-                .split_whitespace()
-                .nth(1)?
-                .parse::<u32>()
-                .ok()
-        })?;
+    let ppid = ppid_of(std::process::id())?;
     std::fs::read_to_string(format!("/proc/{}/comm", ppid))
         .ok()
         .map(|s| s.trim().to_string())
@@ -67,10 +58,79 @@ fn ppid_of(pid: u32) -> Option<u32> {
         })
 }
 
+// Compile-time check: Pam is a newtype over *const c_void (PamHandle).
+// If pamsm ever changes this, transmute_copy below will fail to compile.
+const _: () = assert!(
+    std::mem::size_of::<Pam>() == std::mem::size_of::<*const std::ffi::c_void>()
+);
+
+extern "C" {
+    // pam_get_item is already linked via pamsm's #[link(name = "pam")].
+    // We redeclare it here to access PAM_TTY (item type 3), which pamsm 0.5.5
+    // does not expose as a public method.
+    fn pam_get_item(
+        pamh: *const std::ffi::c_void,
+        item_type: libc::c_int,
+        item: *mut *const std::ffi::c_void,
+    ) -> libc::c_int;
+}
+
+/// Read PAM_TTY (item 3) from the PAM handle. Returns Some(tty) when non-empty.
+///
+/// SAFETY: Pam is `Pam(pub(crate) *const c_void)` - a single-field newtype of the
+/// same size and alignment as a pointer. transmute_copy reads those bytes as a
+/// raw handle. pam_get_item does not mutate the handle; the returned pointer is
+/// borrowed from libpam's internal state and valid for the duration of the PAM
+/// transaction.
+fn pam_tty(pamh: &Pam) -> Option<String> {
+    let handle = unsafe { std::mem::transmute_copy::<Pam, *const std::ffi::c_void>(pamh) };
+    let mut item: *const std::ffi::c_void = std::ptr::null();
+    let rc = unsafe { pam_get_item(handle, 3, &mut item) };
+    if rc != 0 || item.is_null() {
+        return None;
+    }
+    unsafe { std::ffi::CStr::from_ptr(item as *const libc::c_char) }
+        .to_str()
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// True if the user has an active login session, checked via
+/// /run/systemd/users/<uid>. systemd-logind creates this file when the
+/// user's first session starts and removes it when the last session ends.
+/// The file is root:root 0644, so it is readable from any process — including
+/// sandboxed daemons such as polkitd, which hides /run/user/ via ProtectHome=yes
+/// but leaves /run/systemd/users/ accessible.
+///
+/// Catches GUI-session PAM callers that run in a sandboxed or stripped
+/// environment with no WAYLAND_DISPLAY or /dev/tty: polkitd (runs as the
+/// polkitd user with PrivateHome/PrivateNetwork) and kscreenlocker_greet
+/// (strips WAYLAND_DISPLAY to use a private compositor socket).
+/// SSH and other remote sessions are already excluded by earlier checks.
+fn has_active_user_session(uid: u32) -> bool {
+    std::path::Path::new(&format!("/run/systemd/users/{}", uid)).exists()
+}
+
+/// True if this is an interactive session. Checks in order:
+/// 1. /dev/tty is openable (terminal emulator, console login, sudo).
+/// 2. PAM_TTY is set and non-empty: display managers (SDDM, GDM) set this
+///    to the VT or display (:0, tty2, etc.); cron and systemd services leave it unset.
+/// 3. DISPLAY or WAYLAND_DISPLAY are set (inherited by most GUI callers).
+/// 4. /run/systemd/users/<uid> exists: the user has an active systemd login session.
+///    Catches polkitd and kscreenlocker_greet which fail checks 1-3.
+fn is_interactive_session(pamh: &Pam, uid: Option<u32>) -> bool {
+    std::fs::OpenOptions::new().read(true).open("/dev/tty").is_ok()
+        || pam_tty(pamh).is_some()
+        || std::env::var_os("DISPLAY").is_some()
+        || std::env::var_os("WAYLAND_DISPLAY").is_some()
+        || uid.map_or(false, has_active_user_session)
+}
+
 /// True if any ancestor process in the chain is named "sshd".
 ///
 /// PAM_RHOST is only set for the direct SSH login; when the user runs `sudo`
-/// inside an SSH session, PAM_RHOST is unset and `has_controlling_tty()`
+/// inside an SSH session, PAM_RHOST is unset and `is_interactive_session()`
 /// returns true (SSH allocates a real PTY). Walking the process tree and
 /// checking for an sshd parent catches this case reliably.
 fn has_sshd_ancestor() -> bool {
@@ -238,6 +298,10 @@ fn do_authenticate(pamh: &Pam) -> PamError {
         let _ = pamh.syslog(LogLvl::NOTICE, &format!("[{caller}] face authentication skipped for {user_desc}: running inside SSH session"));
         return PamError::AUTHINFO_UNAVAIL;
     }
+    if !is_interactive_session(pamh, uid) {
+        let _ = pamh.syslog(LogLvl::NOTICE, &format!("[{caller}] face authentication skipped for {user_desc}: not an interactive session"));
+        return PamError::AUTHINFO_UNAVAIL;
+    }
 
     // Check per-user and global opt files via the daemon (which runs as root and
     // can read /etc/security/faceauth/ regardless of directory permissions).
@@ -262,17 +326,10 @@ fn do_authenticate(pamh: &Pam) -> PamError {
         }
     };
 
-    let camera_index = face_model.camera.index;
-    let camera_desc = match &face_model.camera.by_id {
-        Some(id) => format!("/dev/video{camera_index} ({id})"),
-        None => format!("/dev/video{camera_index}"),
-    };
+    let camera_index = faceauth_core::resolve_camera_to_index(&face_model.camera);
     let camera_name = camera_name_for_index(camera_index);
-    let camera_display = if camera_name.is_empty() {
-        format!("/dev/video{camera_index}")
-    } else {
-        format!("{camera_name} at /dev/video{camera_index}")
-    };
+    let camera_desc = &face_model.camera;
+    let camera_display = if camera_name.is_empty() { face_model.camera.clone() } else { camera_name };
 
     let _ = pamh.syslog(LogLvl::NOTICE, &format!("[{caller}] face authentication starting for {user_desc} using {camera_desc}"));
 

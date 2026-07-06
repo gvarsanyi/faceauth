@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# generate.sh — rasterise faceauth.svg into PNG and ICO variants.
+# generate.sh -- rasterise faceauth.svg into PNG and ICO variants.
 #
 # Output:
 #   png/faceauth-<size>.png  for each size in SIZES
 #   faceauth.ico             from the 32x32 PNG
+#
+# Dependencies:
+#   rsvg-convert  (librsvg2-bin / rsvg2-tools / librsvg)  for SVG -> PNG
+#   magick        (ImageMagick)                            for PNG -> ICO
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -18,7 +22,7 @@ echo "==> $svg"
 
 for size in "${SIZES[@]}"; do
     out="png/${base}-${size}.png"
-    magick -background none -size "${size}x${size}" "SVG:${svg}" "$out"
+    rsvg-convert -w "${size}" -h "${size}" "${svg}" -o "${out}"
     echo "    ${size}x${size} -> $out"
 done
 

@@ -6,6 +6,8 @@
 #include <QVariantList>
 #include <QtQmlIntegration>
 
+#include <functional>
+
 #include <QtGlobal> // quint32
 
 class FaceAuthBackend : public QObject
@@ -110,6 +112,9 @@ private:
     // Send a quick daemon request and call refresh() on success, or set
     // lastError on a non-connection failure. Used by setServiceOpt() and clearAll().
     void sendAndRefresh(QJsonObject request);
+    // Request polkit authentication, then call onGranted if the user
+    // authenticates successfully. Silently does nothing on cancellation.
+    void withAuth(std::function<void()> onGranted);
     // Fetch the merged service list and populate m_servicesList.
     void getServices();
     void captureOne();

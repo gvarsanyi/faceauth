@@ -8,11 +8,10 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
-pub use camera::{camera_id_for_index, camera_name_for_index, list_cameras, CameraInfo};
+pub use camera::{camera_id_for_index, camera_name_for_index, list_cameras, resolve_camera_to_index, CameraInfo};
 use camera::{capture_frame, open_camera};
 pub use encoding::FaceEncoder;
 use error::{FaceAuthError, Result};
-pub use encoding::DISTANCE_THRESHOLD;
 pub use model::{
     compile_services_list, load_model_from_json, record_opt_caller, service_allowed_for_uid,
     uid_for_username, username_for_uid, write_user_opt_entry,
@@ -90,50 +89,6 @@ pub fn capture_with_encoder(
 
     let _ = camera.stop_stream();
     Ok(encoding)
-}
-
-/// Capture a single face encoding by asking the faceauth daemon.
-///
-/// The daemon opens `camera_index`, waits for exactly one face within
-/// `timeout_secs`, and returns the 128-D descriptor. The caller needs no
-/// camera access or dlib.
-///
-/// # Errors
-/// - [`FaceAuthError::Storage`] if the daemon socket is unreachable or I/O fails
-/// - [`FaceAuthError::Camera`] if the daemon reports a capture failure
-///   (timeout, camera error, multiple faces, etc.)
-/// - [`FaceAuthError::Dlib`] if the returned encoding has unexpected length
-pub fn capture_encoding_via_daemon(camera_index: u32, timeout_secs: u64) -> Result<[f32; 128]> {
-    use crate::ipc::{Request, Response, SOCKET_PATH};
-
-    let stream = UnixStream::connect(SOCKET_PATH)
-        .map_err(FaceAuthError::Storage)?;
-
-    let read_timeout = Duration::from_secs(timeout_secs.saturating_add(10));
-    stream.set_read_timeout(Some(read_timeout)).map_err(FaceAuthError::Storage)?;
-
-    let req = Request::CaptureEncoding { camera_index, timeout_secs };
-    let mut line = serde_json::to_string(&req)?;
-    line.push('\n');
-    (&stream).write_all(line.as_bytes()).map_err(FaceAuthError::Storage)?;
-
-    let mut reader = BufReader::new(&stream);
-    let mut line = String::new();
-    reader.read_line(&mut line).map_err(FaceAuthError::Storage)?;
-
-    let response: Response = serde_json::from_str(line.trim())?;
-    match response {
-        Response::Encoding { data } => {
-            data.try_into().map_err(|_| FaceAuthError::Dlib(
-                "encoding from daemon must be exactly 128 floats".to_string(),
-            ))
-        }
-        Response::Err { message } => Err(FaceAuthError::Camera(message)),
-        _ => Err(FaceAuthError::Storage(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "unexpected response from faceauth daemon",
-        ))),
-    }
 }
 
 /// Load a user's face model by asking the faceauth daemon via the IPC socket.
@@ -248,22 +203,6 @@ pub fn authenticate_with_encoder(
     } else {
         Err(FaceAuthError::Timeout(config.timeout.as_secs()))
     }
-}
-
-/// Authenticate using a pre-loaded `FaceModel`.
-///
-/// Creates a new `FaceEncoder`, then delegates to [`authenticate_with_encoder`].
-/// Prefer [`authenticate_with_encoder`] in long-running processes that want to
-/// initialise the encoder once and reuse it.
-///
-/// # Errors
-/// - [`FaceAuthError::ModelNotFound`] if the model contains no encodings
-/// - [`FaceAuthError::Timeout`] if no matching face is found within `config.timeout`
-/// - [`FaceAuthError::Camera`] if the camera cannot be opened or read
-/// - [`FaceAuthError::Dlib`] if the face encoder fails to initialise
-pub fn authenticate_face_with_model(face_model: FaceModel, config: &AuthConfig) -> Result<()> {
-    let encoder = FaceEncoder::new()?;
-    authenticate_with_encoder(&encoder, face_model, config)
 }
 
 /// Ask the daemon whether `service` is opted in for `username`.

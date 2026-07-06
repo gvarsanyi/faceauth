@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use nokhwa::pixel_format::LumaFormat;
 use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
@@ -216,73 +216,64 @@ fn enumerate_v4l_dir(dir: &Path) -> Vec<(String, u32)> {
         .collect()
 }
 
-/// Build a `CameraId` for a known V4L2 device index by looking up its
-/// stable udev symlink names in `/dev/v4l/by-id/` and `/dev/v4l/by-path/`.
+/// Build a `CameraId` for a known V4L2 device index.
+///
+/// Returns the by-path symlink name from `/dev/v4l/by-path/` (most specific),
+/// falling back to the by-id name, then `"/dev/videoN"` as a last resort.
 pub fn camera_id_for_index(index: u32) -> CameraId {
-    let by_id = enumerate_v4l_dir(Path::new("/dev/v4l/by-id/"))
+    if let Some((name, _)) = enumerate_v4l_dir(Path::new("/dev/v4l/by-path/"))
         .into_iter()
         .find(|(_, i)| *i == index)
-        .map(|(name, _)| name);
-
-    let by_path = enumerate_v4l_dir(Path::new("/dev/v4l/by-path/"))
+    {
+        return name;
+    }
+    if let Some((name, _)) = enumerate_v4l_dir(Path::new("/dev/v4l/by-id/"))
         .into_iter()
         .find(|(_, i)| *i == index)
-        .map(|(name, _)| name);
-
-    CameraId { by_id, by_path, index }
+    {
+        return name;
+    }
+    format!("/dev/video{index}")
 }
 
-/// Resolve a `CameraId` back to a `/dev/videoN` index.
+/// Resolve a `CameraId` string back to a `/dev/videoN` index.
 ///
-/// Resolution order:
-/// 1. `by_id`  — look up in `/dev/v4l/by-id/`
-/// 2. `by_path` — look up in `/dev/v4l/by-path/`
-/// 3. `index`  — use the stored integer directly
-fn resolve_camera_index(id: &CameraId) -> u32 {
-    // Helper: resolve a symlink name in a udev dir to its device index.
-    let resolve = |dir: &Path, name: &str| -> Option<u32> {
-        let link: PathBuf = dir.join(name);
-        let target = std::fs::canonicalize(&link).ok()?;
-        let file_name = target.file_name()?.to_str()?;
-        file_name.strip_prefix("video")?.parse().ok()
+/// Handles:
+/// - `"/dev/videoN"` strings (last-resort fallback stored when udev is absent)
+/// - by-path symlink names looked up in `/dev/v4l/by-path/`
+/// - by-id symlink names looked up in `/dev/v4l/by-id/`
+pub fn resolve_camera_to_index(id: &str) -> u32 {
+    // Fast path: "/dev/videoN" stored directly.
+    if let Some(n) = id.strip_prefix("/dev/video") {
+        if let Ok(i) = n.parse::<u32>() {
+            return i;
+        }
+    }
+
+    let resolve = |dir: &Path| -> Option<u32> {
+        let target = std::fs::canonicalize(dir.join(id)).ok()?;
+        target.file_name()?.to_str()?.strip_prefix("video")?.parse().ok()
     };
 
-    // Try by_path first: it encodes both the USB port and the interface number
-    // within the device, making it the most specific identifier for cameras
-    // that expose multiple V4L2 interfaces (e.g. RGB + IR streams). by_id only
-    // encodes the device serial, so its video-index suffix can resolve to a
-    // different /dev/videoN after a reboot if the kernel assigns indices
-    // differently.
-    if let Some(name) = &id.by_path {
-        if let Some(idx) = resolve(Path::new("/dev/v4l/by-path/"), name) {
-            return idx;
-        }
+    if let Some(i) = resolve(Path::new("/dev/v4l/by-path/")) {
+        return i;
     }
-
-    // Fall back to by_id: stable across USB port changes, but ambiguous for
-    // multi-interface devices.
-    if let Some(name) = &id.by_id {
-        if let Some(idx) = resolve(Path::new("/dev/v4l/by-id/"), name) {
-            return idx;
-        }
+    if let Some(i) = resolve(Path::new("/dev/v4l/by-id/")) {
+        return i;
     }
-
-    id.index
+    0
 }
 
 /// Open the camera described by `id` and return a handle.
 ///
-/// Resolves `id` to a `/dev/videoN` index using the stable udev symlinks
-/// when available, falling back to the stored integer index.
-///
+/// Resolves `id` to a `/dev/videoN` index, then opens the device.
 /// The stream is NOT started yet; call `camera.open_stream()` before
-/// calling `capture_frame`. This separation lets callers handle setup
-/// errors before entering the capture loop.
+/// calling `capture_frame`.
 ///
 /// # Errors
 /// Returns [`FaceAuthError::Camera`] if the device cannot be opened.
-pub fn open_camera(id: &CameraId) -> Result<Camera> {
-    let index = resolve_camera_index(id);
+pub fn open_camera(id: &str) -> Result<Camera> {
+    let index = resolve_camera_to_index(id);
     let cam_index = CameraIndex::Index(index);
     // LumaFormat includes GRAY in its supported formats (unlike RgbFormat which
     // only includes colour formats), so this works for both greyscale IR cameras

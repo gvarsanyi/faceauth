@@ -20,8 +20,8 @@ msgid "cannot determine username for current UID"
 msgstr "Benutzername für aktuelle UID konnte nicht ermittelt werden"
 
 #: faceauth-cli/src/main.rs
-msgid "'{user}' is already enrolled with /dev/video{camera}; omit --camera to add another batch, or run 'faceauth clear' first to change cameras"
-msgstr "'{user}' ist bereits mit /dev/video{camera} registriert; lassen Sie --camera weg, um einen weiteren Batch hinzuzufügen, oder führen Sie zuerst 'faceauth clear' aus, um die Kamera zu wechseln"
+msgid "'{user}' is already enrolled with {camera}; omit --camera to add another batch, or run 'faceauth clear' first to change cameras"
+msgstr "'{user}' ist bereits mit {camera} registriert; lassen Sie --camera weg, um einen weiteren Batch hinzuzufügen, oder führen Sie zuerst 'faceauth clear' aus, um die Kamera zu wechseln"
 
 #: faceauth-cli/src/main.rs
 msgid "enrolling face for '{user}'"
@@ -92,16 +92,8 @@ msgid "UID"
 msgstr "UID"
 
 #: faceauth-cli/src/main.rs
-msgid "Camera index"
-msgstr "Kameraindex"
-
-#: faceauth-cli/src/main.rs
-msgid "Camera by-id"
-msgstr "Kamera nach ID"
-
-#: faceauth-cli/src/main.rs
-msgid "Camera by-path"
-msgstr "Kamera nach Pfad"
+msgid "Camera"
+msgstr "Kamera"
 
 #: faceauth-cli/src/main.rs
 msgid "Batches"

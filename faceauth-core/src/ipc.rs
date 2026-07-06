@@ -37,7 +37,7 @@ pub enum Request {
     ///
     /// `encodings` is a batch of 128-dimensional dlib face descriptors captured
     /// in a single `faceauth add` run. The daemon appends it as one entry to
-    /// `/etc/security/faceauth/<uid>.json`.
+    /// `/etc/security/faceauth/<uid>.enc.json`.
     Enroll {
         username: String,
         camera_index: u32,
