@@ -1,15 +1,16 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 #pragma once
 
 #include <QObject>
-#include <QStringList>
-#include <QTimer>
 #include <QVariantList>
 #include <QtQmlIntegration>
 
-#include <functional>
+namespace FaceAuthDaemon {
+struct Result;
+}
 
-#include <QtGlobal> // quint32
-
+// QML-facing state and actions for the current user's face authentication.
+// All daemon access is asynchronous over D-Bus.
 class FaceAuthBackend : public QObject
 {
     Q_OBJECT
@@ -17,49 +18,42 @@ class FaceAuthBackend : public QObject
     QML_UNCREATABLE("Instantiated by C++")
 
     // --- Model state ---
-    Q_PROPERTY(bool enrolled     READ enrolled     NOTIFY modelChanged)
-    Q_PROPERTY(QString username  READ username     CONSTANT)
-    Q_PROPERTY(int cameraIndex    READ cameraIndex NOTIFY modelChanged)
-    Q_PROPERTY(QVariantList cameras READ cameras   NOTIFY camerasChanged)
+    Q_PROPERTY(bool enrolled READ enrolled NOTIFY modelChanged)
+    // /dev/videoN of the enrolled camera; -1 if not enrolled or not connected.
+    Q_PROPERTY(int cameraIndex READ cameraIndex NOTIFY modelChanged)
+    // List of {index, name, suitability}.
+    Q_PROPERTY(QVariantList cameras READ cameras NOTIFY camerasChanged)
 
-    // --- Services opt list ---
+    // --- Services: list of {name, enabled} for admin-allowed services ---
     Q_PROPERTY(QVariantList servicesList READ servicesList NOTIFY servicesChanged)
 
-    // --- Enrollment state machine ---
-    Q_PROPERTY(bool enrolling    READ enrolling    NOTIFY enrollingChanged)
-    Q_PROPERTY(int  capturesDone READ capturesDone NOTIFY capturesDoneChanged)
-    Q_PROPERTY(int  capturesTotal READ capturesTotal CONSTANT)
+    // --- Enrollment ---
+    Q_PROPERTY(bool enrolling READ enrolling NOTIFY enrollingChanged)
+    Q_PROPERTY(int capturesDone READ capturesDone NOTIFY capturesDoneChanged)
+    Q_PROPERTY(int capturesTotal READ capturesTotal NOTIFY capturesDoneChanged)
 
     // --- Test authentication ---
     Q_PROPERTY(bool testing READ testing NOTIFY testingChanged)
 
-    // --- Daemon availability ---
+    // --- Daemon availability and async status ---
     Q_PROPERTY(bool daemonAvailable READ daemonAvailable NOTIFY daemonAvailableChanged)
-
-    // --- Async operation status ---
-    Q_PROPERTY(bool busy         READ busy         NOTIFY busyChanged)
-    Q_PROPERTY(QString lastError READ lastError    NOTIFY lastErrorChanged)
+    Q_PROPERTY(bool busy READ busy NOTIFY busyChanged)
+    Q_PROPERTY(QString lastError READ lastError NOTIFY lastErrorChanged)
 
 public:
-    static constexpr int CAPTURES_REQUIRED = 5;
-    // Per-capture timeout sent to the daemon (seconds).
-    static constexpr int CAPTURE_TIMEOUT_SECS = 30;
-
     explicit FaceAuthBackend(QObject *parent = nullptr);
 
-    // Property accessors
-    bool        enrolled()      const { return m_batchCount > 0; }
-    QString     username()      const { return m_username; }
-    int         cameraIndex()   const { return m_cameraIndex; }
-    QVariantList cameras()        const { return m_cameras; }
-    QVariantList servicesList()   const { return m_servicesList; }
-    bool        daemonAvailable() const { return m_daemonAvailable; }
-    bool        enrolling()     const { return m_enrolling; }
-    int         capturesDone()  const { return m_capturesDone; }
-    int         capturesTotal() const { return CAPTURES_REQUIRED; }
-    bool        testing()       const { return m_testing; }
-    bool        busy()          const { return m_busy; }
-    QString     lastError()     const { return m_lastError; }
+    bool enrolled() const { return m_batchCount > 0; }
+    int cameraIndex() const { return m_cameraIndex; }
+    QVariantList cameras() const { return m_cameras; }
+    QVariantList servicesList() const { return m_servicesList; }
+    bool enrolling() const { return m_enrolling; }
+    int capturesDone() const { return m_capturesDone; }
+    int capturesTotal() const { return m_capturesTotal; }
+    bool testing() const { return m_testing; }
+    bool daemonAvailable() const { return m_daemonAvailable; }
+    bool busy() const { return m_busy; }
+    QString lastError() const { return m_lastError; }
 
 Q_SIGNALS:
     void modelChanged();
@@ -72,95 +66,53 @@ Q_SIGNALS:
     void lastErrorChanged();
     void testingChanged();
 
-    // Emitted after all captures complete and the Enroll request succeeds.
+    // Emitted when an enrollment batch has been stored.
     void enrollmentSucceeded();
-    // Emitted on any operation error (sets lastError first).
-    void operationFailed(const QString &message);
-    // Emitted after a testAuth() call completes.
+    // Emitted when testAuth() completes.
     void authSucceeded();
     void authFailed(const QString &message);
-    // Emitted by the "Enroll New Face..." button action. Standalone wires this
-    // to open a dialog; KCM wires it to kcm.push("EnrollPage.qml", ...).
-    void enrollRequested();
 
 public Q_SLOTS:
-    // Load current user's model from the daemon; populates all properties.
+    // Reload model, cameras, and services from the daemon.
     Q_INVOKABLE void refresh();
-
-    // Service opt-in/opt-out (immediate apply, updates <uid>.opt).
-    Q_INVOKABLE void setServiceOpt(const QString &service, bool allowed);
-
-    // Clear all enrollment data.
+    // Enable or disable face authentication for an admin-allowed service.
+    Q_INVOKABLE void setServiceEnabled(const QString &service, bool enabled);
+    // Delete all enrolled face data.
     Q_INVOKABLE void clearAll();
-
-    // Enrollment flow. cameraIndex is the /dev/videoN index to use.
-    // Automatically performs CAPTURES_REQUIRED CaptureEncoding round-trips,
-    // then submits a single Enroll request. No threads needed  -  uses the
-    // Qt event loop via signal-chained async callbacks.
+    // Capture a new batch on /dev/video<cameraIndex>; -1 reuses the enrolled camera.
     Q_INVOKABLE void startEnrollment(int cameraIndex);
     Q_INVOKABLE void cancelEnrollment();
-
-    // Run a single authentication attempt against the enrolled model.
-    // Emits authSucceeded() or authFailed(message) when complete.
+    // Run one authentication attempt; emits authSucceeded() or authFailed().
     Q_INVOKABLE void testAuth();
-
-    // Clear the lastError property (called from QML when the user dismisses
-    // the error banner).
     Q_INVOKABLE void clearLastError();
 
+private Q_SLOTS:
+    void onEnrollProgress(uint done, uint total, const QString &status);
+    void onDaemonUnregistered();
+
 private:
-    // Send a quick daemon request and call refresh() on success, or set
-    // lastError on a non-connection failure. Used by setServiceOpt() and clearAll().
-    void sendAndRefresh(QJsonObject request);
-    // Request polkit authentication, then call onGranted if the user
-    // authenticates successfully. Silently does nothing on cancellation.
-    void withAuth(std::function<void()> onGranted);
-    // Fetch the merged service list and populate m_servicesList.
-    void getServices();
-    void captureOne();
-    void submitEnrollment();
-    void parseModelJson(const QString &rawJson);
-    void listCameras();
-    // Desktop notification helpers for testAuth(). Both are fire-and-async;
-    // notifyStart() spawns the helper and stores the ID in m_notifId once done.
-    void notifyStart();
-    void notifyFinish(quint32 notifId, bool success);
-    // Lightweight daemon health-check used by the poll timer. Uses ListCameras
-    // as the probe but intentionally ignores the returned data  -  camera data is
-    // only loaded at startup and after a down->up recovery.
-    void pingDaemon();
+    void loadModel();
+    void loadCameras();
+    void loadServices();
     void setBusy(bool b);
     void setLastError(const QString &err);
-    // Called from every daemon callback. Tracks whether the daemon is reachable.
-    void checkAvailability(bool ok, bool connectionError);
+    void setEnrolling(bool e);
+    // Track daemon reachability from a call result. Returns true if the
+    // result is a daemon-level error that should be shown to the user.
+    bool track(const FaceAuthDaemon::Result &r);
+    // Report a failed operation unless it was a cancelled polkit prompt.
+    void reportFailure(const FaceAuthDaemon::Result &r);
 
-    // Current user (resolved at construction time via getpwuid/getuid).
     QString m_username;
-    quint32 m_uid = 0;
-
-    // Model state  -  updated by parseModelJson() after each daemon call.
-    int         m_batchCount = 0;
-
-    // Services opt list  -  updated by getServices().
-    QVariantList m_servicesList;
-
-    // Available cameras  -  populated once at startup by listCameras().
+    int m_batchCount = 0;
+    int m_cameraIndex = -1;
     QVariantList m_cameras;
-
-    // Enrollment state machine.
-    bool     m_enrolling     = false;
-    int      m_capturesDone  = 0;
-    bool     m_testing       = false;
-    quint32  m_notifId       = 0;   // notification ID from notifyStart(); 0 = none
-    int      m_cameraIndex   = 0;
-    // Each element is a QVariantList of 128 doubles (one capture).
-    QList<QVariantList> m_capturedEncodings;
-
-    // Daemon availability  -  false when the socket is unreachable.
-    bool    m_daemonAvailable = true; // optimistic; corrected on first response
-    QTimer *m_pollTimer = nullptr;    // health-checks daemon every 2 s (always running)
-
-    // Async status.
-    bool    m_busy      = false;
+    QVariantList m_servicesList;
+    bool m_enrolling = false;
+    int m_capturesDone = 0;
+    int m_capturesTotal = 5;
+    bool m_testing = false;
+    bool m_daemonAvailable = true; // optimistic until the first reply
+    bool m_busy = false;
     QString m_lastError;
 };

@@ -1,377 +1,174 @@
-use std::io::Read;
-use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
+//! pam_faceauth: PAM module that asks faceauth-daemon to match the face of
+//! `PAM_USER`.
+//!
+//! Every non-success outcome returns `PAM_AUTHINFO_UNAVAIL`, so the stack
+//! falls through to the next module (normally the password prompt).
+//!
+//! Module arguments:
+//! - `timeout=N`: authentication timeout in seconds (default: configured)
 
-use faceauth_core::{
-    authenticate_via_daemon, camera_name_for_index, check_service_via_daemon, error::FaceAuthError,
-    load_model_via_daemon, record_caller_via_daemon,
-};
-use pamsm::{Pam, PamError, PamFlags, PamLibExt, PamMsgStyle, PamServiceModule, LogLvl};
+use std::time::Duration;
+
+use faceauth_common::client::Client;
+use faceauth_common::config::{Config, MAX_AUTH_TIMEOUT_SECS};
+use faceauth_common::dbus::Error;
+use faceauth_common::logind::{self, SessionInfo};
+use faceauth_common::users;
+use pamsm::{LogLvl, Pam, PamError, PamFlags, PamLibExt, PamMsgStyle, PamServiceModule};
 
 struct FaceAuthPam;
 
 impl PamServiceModule for FaceAuthPam {
-    fn authenticate(pamh: Pam, _flags: PamFlags, _args: Vec<String>) -> PamError {
-        // Wrap the entire body in catch_unwind: a Rust panic unwinding through
-        // the C PAM stack is undefined behaviour and will crash the calling process.
-        let result = std::panic::catch_unwind(|| do_authenticate(&pamh));
+    fn authenticate(pamh: Pam, _flags: PamFlags, args: Vec<String>) -> PamError {
+        // A panic unwinding into the C caller is undefined behaviour.
+        std::panic::catch_unwind(|| do_authenticate(&pamh, &args)).unwrap_or(PamError::AUTHINFO_UNAVAIL)
+    }
 
-        match result {
-            Ok(err) => err,
-            Err(_) => PamError::AUTH_ERR,
-        }
+    /// Face authentication establishes no credentials.
+    fn setcred(_: Pam, _: PamFlags, _: Vec<String>) -> PamError {
+        PamError::SUCCESS
     }
 }
 
-/// True if `PAM_RHOST` is set and non-empty, meaning the authentication
-/// request came from a remote host (e.g. SSH, rlogin).
-fn is_remote_session(pamh: &Pam) -> bool {
-    pamh.get_rhost()
-        .ok()
-        .flatten()
-        .and_then(|c| c.to_str().ok())
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false)
+/// Parsed module arguments.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Args {
+    timeout_secs: Option<u32>,
+    unknown: Vec<String>,
 }
 
-
-/// Return the name of the calling process's parent by reading /proc.
-fn parent_process_name() -> Option<String> {
-    let ppid = ppid_of(std::process::id())?;
-    std::fs::read_to_string(format!("/proc/{}/comm", ppid))
-        .ok()
-        .map(|s| s.trim().to_string())
-}
-
-
-/// Read the PPid field from /proc/<pid>/status, or None if unreadable.
-fn ppid_of(pid: u32) -> Option<u32> {
-    std::fs::read_to_string(format!("/proc/{}/status", pid))
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .find(|l| l.starts_with("PPid:"))?
-                .split_whitespace()
-                .nth(1)?
-                .parse::<u32>()
-                .ok()
-        })
-}
-
-// Compile-time check: Pam is a newtype over *const c_void (PamHandle).
-// If pamsm ever changes this, transmute_copy below will fail to compile.
-const _: () = assert!(
-    std::mem::size_of::<Pam>() == std::mem::size_of::<*const std::ffi::c_void>()
-);
-
-extern "C" {
-    // pam_get_item is already linked via pamsm's #[link(name = "pam")].
-    // We redeclare it here to access PAM_TTY (item type 3), which pamsm 0.5.5
-    // does not expose as a public method.
-    fn pam_get_item(
-        pamh: *const std::ffi::c_void,
-        item_type: libc::c_int,
-        item: *mut *const std::ffi::c_void,
-    ) -> libc::c_int;
-}
-
-/// Read PAM_TTY (item 3) from the PAM handle. Returns Some(tty) when non-empty.
-///
-/// SAFETY: Pam is `Pam(pub(crate) *const c_void)` - a single-field newtype of the
-/// same size and alignment as a pointer. transmute_copy reads those bytes as a
-/// raw handle. pam_get_item does not mutate the handle; the returned pointer is
-/// borrowed from libpam's internal state and valid for the duration of the PAM
-/// transaction.
-fn pam_tty(pamh: &Pam) -> Option<String> {
-    let handle = unsafe { std::mem::transmute_copy::<Pam, *const std::ffi::c_void>(pamh) };
-    let mut item: *const std::ffi::c_void = std::ptr::null();
-    let rc = unsafe { pam_get_item(handle, 3, &mut item) };
-    if rc != 0 || item.is_null() {
-        return None;
-    }
-    unsafe { std::ffi::CStr::from_ptr(item as *const libc::c_char) }
-        .to_str()
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-/// True if the user has an active login session, checked via
-/// /run/systemd/users/<uid>. systemd-logind creates this file when the
-/// user's first session starts and removes it when the last session ends.
-/// The file is root:root 0644, so it is readable from any process — including
-/// sandboxed daemons such as polkitd, which hides /run/user/ via ProtectHome=yes
-/// but leaves /run/systemd/users/ accessible.
-///
-/// Catches GUI-session PAM callers that run in a sandboxed or stripped
-/// environment with no WAYLAND_DISPLAY or /dev/tty: polkitd (runs as the
-/// polkitd user with PrivateHome/PrivateNetwork) and kscreenlocker_greet
-/// (strips WAYLAND_DISPLAY to use a private compositor socket).
-/// SSH and other remote sessions are already excluded by earlier checks.
-fn has_active_user_session(uid: u32) -> bool {
-    std::path::Path::new(&format!("/run/systemd/users/{}", uid)).exists()
-}
-
-/// True if this is an interactive session. Checks in order:
-/// 1. /dev/tty is openable (terminal emulator, console login, sudo).
-/// 2. PAM_TTY is set and non-empty: display managers (SDDM, GDM) set this
-///    to the VT or display (:0, tty2, etc.); cron and systemd services leave it unset.
-/// 3. DISPLAY or WAYLAND_DISPLAY are set (inherited by most GUI callers).
-/// 4. /run/systemd/users/<uid> exists: the user has an active systemd login session.
-///    Catches polkitd and kscreenlocker_greet which fail checks 1-3.
-fn is_interactive_session(pamh: &Pam, uid: Option<u32>) -> bool {
-    std::fs::OpenOptions::new().read(true).open("/dev/tty").is_ok()
-        || pam_tty(pamh).is_some()
-        || std::env::var_os("DISPLAY").is_some()
-        || std::env::var_os("WAYLAND_DISPLAY").is_some()
-        || uid.map_or(false, has_active_user_session)
-}
-
-/// True if any ancestor process in the chain is named "sshd".
-///
-/// PAM_RHOST is only set for the direct SSH login; when the user runs `sudo`
-/// inside an SSH session, PAM_RHOST is unset and `is_interactive_session()`
-/// returns true (SSH allocates a real PTY). Walking the process tree and
-/// checking for an sshd parent catches this case reliably.
-fn has_sshd_ancestor() -> bool {
-    let mut pid = ppid_of(std::process::id());
-    while let Some(p) = pid {
-        if p <= 1 {
-            break;
+fn parse_args(args: &[String]) -> Args {
+    let mut parsed = Args::default();
+    for arg in args {
+        match arg.split_once('=') {
+            Some(("timeout", v)) => match v.parse::<u32>() {
+                Ok(t) if (1..=MAX_AUTH_TIMEOUT_SECS).contains(&t) => parsed.timeout_secs = Some(t),
+                _ => parsed.unknown.push(arg.clone()),
+            },
+            _ => parsed.unknown.push(arg.clone()),
         }
-        let comm = std::fs::read_to_string(format!("/proc/{}/comm", p))
-            .ok()
-            .map(|s| s.trim().to_string());
-        if comm.as_deref() == Some("sshd") {
-            return true;
-        }
-        pid = ppid_of(p);
     }
-    false
+    parsed
 }
 
-/// Look up the primary GID for a UID via getpwuid_r.
-fn gid_for_uid(uid: u32) -> Option<u32> {
-    let mut buf = vec![0u8; 1024];
-    let mut pwd = std::mem::MaybeUninit::<libc::passwd>::uninit();
-    let mut result: *mut libc::passwd = std::ptr::null_mut();
-    // SAFETY: buf is valid for the call duration; result points into pwd/buf
-    // and is not used after buf is dropped.
-    let ret = unsafe {
-        libc::getpwuid_r(
-            uid,
-            pwd.as_mut_ptr(),
-            buf.as_mut_ptr() as *mut libc::c_char,
-            buf.len(),
-            &mut result,
-        )
+/// Facts about the calling context used to decide whether a person is
+/// sitting at this machine.
+#[derive(Debug)]
+struct Locality {
+    rhost: Option<String>,
+    /// The session that decides locality (see `gather_locality`).
+    session: Option<SessionInfo>,
+}
+
+/// `Ok` if face authentication may run in this context, else the reason.
+///
+/// - Remote requests (`PAM_RHOST` set to anything) are refused.
+/// - The session must be local, attached to a seat, and in the foreground.
+///   This excludes SSH (also `sudo` inside SSH), remote desktop sessions,
+///   and users who have switched away.
+/// - Callers without any session (cron without pam_systemd, system services)
+///   are refused.
+fn check_locality(l: &Locality) -> Result<(), String> {
+    if let Some(host) = l.rhost.as_deref().filter(|h| !h.is_empty()) {
+        return Err(format!("remote host '{host}'"));
+    }
+    match &l.session {
+        Some(s) => s.check_local_active(),
+        None => Err("no login session".into()),
+    }
+}
+
+/// PID and UID of the process at the other end of stdin, if stdin is a
+/// Unix socket. polkit's socket-activated agent helper (polkit 126+) runs
+/// as a system service whose stdin is the connection from the user's polkit
+/// agent.
+fn stdin_peer() -> Option<(u32, u32)> {
+    socket_peer(0)
+}
+
+fn socket_peer(fd: libc::c_int) -> Option<(u32, u32)> {
+    let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: cred and len are valid for writes of the sizes given. On a
+    // non-socket the call fails; on a non-Unix socket the PID is 0.
+    let rc = unsafe {
+        libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_PEERCRED, (&raw mut cred).cast(), &mut len)
     };
-    if ret == 0 && !result.is_null() {
-        Some(unsafe { (*result).pw_gid })
-    } else {
-        None
-    }
+    (rc == 0 && cred.pid > 0).then_some((cred.pid as u32, cred.uid))
 }
 
-/// Spawn faceauth-notify as the given user and send a "start" notification.
-///
-/// Returns the notification ID printed to stdout by the helper, or None if
-/// the helper is unavailable or the user has no graphical session. All errors
-/// are silently swallowed — authentication must never depend on notifications.
-fn notify_start(uid: u32, gid: u32, service: &str, caller: &str, auth_timeout_secs: u32) -> Option<u32> {
-    // Give the notification a timeout slightly longer than the auth attempt so
-    // it auto-dismisses if the replacement notification is never delivered
-    // (e.g. when KDE holds notifications while the screen is locked).
-    let notif_timeout_ms = (auth_timeout_secs + 3) * 1000;
-    let mut cmd = Command::new(concat!(env!("FACEAUTH_LIBEXEC_DIR"), "/faceauth-notify"));
-    cmd.args(["start", &uid.to_string(), service, caller, &notif_timeout_ms.to_string()])
-        .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path=/run/user/{uid}/bus"))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-
-    // Drop to the authenticating user's UID/GID before exec so the helper
-    // can connect to their D-Bus session bus.
-    // SAFETY: setgid/setuid are async-signal-safe; this runs in the child
-    // between fork and exec where only async-signal-safe calls are allowed.
-    unsafe {
-        cmd.pre_exec(move || {
-            if libc::setgid(gid) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::setuid(uid) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-
-    let mut child = cmd.spawn().ok()?;
-    let mut output = String::new();
-    child.stdout.as_mut()?.read_to_string(&mut output).ok()?;
-    child.wait().ok()?;
-    output.trim().parse().ok()
-}
-
-/// Spawn faceauth-notify to replace the in-progress notification with the result.
-/// Fire-and-forget: the child is not waited on.
-fn notify_result(uid: u32, gid: u32, notif_id: u32, success: bool, service: &str, caller: &str) {
-    let subcommand = if success { "success" } else { "failure" };
-    let mut cmd = Command::new(concat!(env!("FACEAUTH_LIBEXEC_DIR"), "/faceauth-notify"));
-    cmd.args([subcommand, &uid.to_string(), &notif_id.to_string(), service, caller])
-        .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path=/run/user/{uid}/bus"))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-
-    // SAFETY: same as notify_start.
-    unsafe {
-        cmd.pre_exec(move || {
-            if libc::setgid(gid) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::setuid(uid) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-
-    let _ = cmd.spawn(); // fire-and-forget: don't wait
-}
-
-/// Core authentication logic: load model, print status, run face match, send notification.
-///
-/// Returns `PamError::SUCCESS` on match, `PamError::AUTHINFO_UNAVAIL` on any
-/// failure so the PAM stack falls through to the next module (e.g. password).
-fn do_authenticate(pamh: &Pam) -> PamError {
-    // For privilege-escalation services (sudo, su), PAM_RUSER is the invoking
-    // user — the one whose face we should check. PAM_USER is the target (root),
-    // which has no enrolled model. Fall back to PAM_USER if RUSER is unset.
-    let username: String = {
-        let ruser = pamh.get_ruser().ok().flatten()
-            .and_then(|c| c.to_str().ok())
-            .map(|s| s.to_string());
-        match ruser {
-            Some(u) if !u.is_empty() => u,
-            _ => {
-                let user_cstr = match pamh.get_user(None) {
-                    Ok(Some(u)) => u,
-                    Ok(None) => return PamError::USER_UNKNOWN,
-                    Err(_) => return PamError::AUTH_ERR,
-                };
-                match user_cstr.to_str() {
-                    Ok(s) => s.to_string(),
-                    Err(_) => return PamError::USER_UNKNOWN,
-                }
-            }
-        }
+/// The session that decides locality, in order: this process's own logind
+/// session; for a process outside any session whose stdin is a Unix socket,
+/// the peer's session (polkit agent); otherwise the graphical session of the
+/// real UID, which setuid callers (sudo, su) keep and `PAM_USER` does not
+/// influence.
+fn gather_locality(pamh: &Pam, client: &Client) -> Result<Locality, String> {
+    let rhost = pamh.get_rhost().ok().flatten().and_then(|c| c.to_str().ok()).map(str::to_string);
+    let conn = client.connection();
+    let logind_err = |e| format!("logind: {e}");
+    let session = match logind::session_for_pid(conn, std::process::id()).map_err(logind_err)? {
+        Some(s) => Some(s),
+        None => match stdin_peer() {
+            Some((pid, uid)) => logind::caller_session(conn, pid, uid).map_err(logind_err)?,
+            None => logind::display_session(conn, users::current_uid()).map_err(logind_err)?,
+        },
     };
-    let username = username.as_str();
+    Ok(Locality { rhost, session })
+}
 
-    let uid = faceauth_core::uid_for_username(username);
-    let gid = uid.and_then(gid_for_uid);
-    let user_desc = match uid {
-        Some(uid) => format!("{username} (uid: {uid})"),
-        None => username.to_string(),
+fn log(pamh: &Pam, level: LogLvl, msg: &str) {
+    let _ = pamh.syslog(level, &format!("pam_faceauth: {msg}"));
+}
+
+fn do_authenticate(pamh: &Pam, raw_args: &[String]) -> PamError {
+    let args = parse_args(raw_args);
+    for a in &args.unknown {
+        log(pamh, LogLvl::WARNING, &format!("ignoring invalid argument '{a}'"));
+    }
+
+    // Without a usable user or service there is nothing to check; the
+    // daemon treats an empty service as test mode, so it must never be sent.
+    let item = |v: Result<Option<&std::ffi::CStr>, PamError>| v.ok().flatten().and_then(|c| c.to_str().ok()).map(str::to_string);
+    let (Some(username), Some(service)) = (item(pamh.get_user(None)), item(pamh.get_service())) else {
+        log(pamh, LogLvl::NOTICE, "skipped: PAM user or service unavailable");
+        return PamError::AUTHINFO_UNAVAIL;
     };
-
-    let service = pamh.get_service().ok().flatten()
-        .and_then(|c| c.to_str().ok())
-        .unwrap_or("unknown")
-        .to_string();
-
-    record_caller_via_daemon(&service);
-
-    let parent = parent_process_name();
-    // `caller` is used in syslog; `parent` is passed to faceauth-notify separately
-    // so it can format "Requested by: {service} via {parent}" without double "via".
-    let caller = parent.as_deref()
-        .map(|name| format!("{service} via {name}"))
-        .unwrap_or_else(|| service.clone());
-
-    // Refuse to attempt face authentication for remote or unattended sessions.
-    // These checks happen before touching the daemon to fail fast.
-    if is_remote_session(pamh) {
-        let _ = pamh.syslog(LogLvl::NOTICE, &format!("[{caller}] face authentication skipped for {user_desc}: remote session"));
+    if username.is_empty() || service.is_empty() {
+        log(pamh, LogLvl::NOTICE, "skipped: empty PAM user or service");
         return PamError::AUTHINFO_UNAVAIL;
     }
-    if has_sshd_ancestor() {
-        let _ = pamh.syslog(LogLvl::NOTICE, &format!("[{caller}] face authentication skipped for {user_desc}: running inside SSH session"));
-        return PamError::AUTHINFO_UNAVAIL;
-    }
-    if !is_interactive_session(pamh, uid) {
-        let _ = pamh.syslog(LogLvl::NOTICE, &format!("[{caller}] face authentication skipped for {user_desc}: not an interactive session"));
-        return PamError::AUTHINFO_UNAVAIL;
-    }
-
-    // Check per-user and global opt files via the daemon (which runs as root and
-    // can read /etc/security/faceauth/ regardless of directory permissions).
-    // Service must be opted in (+) to proceed.
-    if !check_service_via_daemon(username, &service) {
-        let _ = pamh.syslog(LogLvl::NOTICE, &format!("[{caller}] face authentication skipped for {user_desc}: service not opted in"));
-        return PamError::AUTHINFO_UNAVAIL;
-    }
-
-    // Load the model via the daemon so the PAM module does not need direct
-    // access to /etc/security/faceauth/ (which is only readable by faceauthd).
-    let face_model = match load_model_via_daemon(username) {
-        Ok(m) => m,
-        Err(FaceAuthError::ModelNotFound(_)) => {
-            let _ = pamh.syslog(LogLvl::NOTICE, &format!("[{caller}] no face model enrolled for {user_desc}, skipping"));
-            return PamError::AUTHINFO_UNAVAIL;
-        }
-        Err(e) => {
-            // Storage or other infrastructure error: don't block login.
-            let _ = pamh.syslog(LogLvl::ERR, &format!("[{caller}] could not load face model for {user_desc}, skipping: {e}"));
-            return PamError::AUTHINFO_UNAVAIL;
-        }
+    let skip = |reason: &str| {
+        log(pamh, LogLvl::NOTICE, &format!("[{service}] skipped for {username}: {reason}"));
+        PamError::AUTHINFO_UNAVAIL
     };
 
-    let camera_index = faceauth_core::resolve_camera_to_index(&face_model.camera);
-    let camera_name = camera_name_for_index(camera_index);
-    let camera_desc = &face_model.camera;
-    let camera_display = if camera_name.is_empty() { face_model.camera.clone() } else { camera_name };
-
-    let _ = pamh.syslog(LogLvl::NOTICE, &format!("[{caller}] face authentication starting for {user_desc} using {camera_desc}"));
-
-    // Inform the user via the PAM conversation function (appears on the
-    // terminal for sudo/su/ssh; graphical PAM agents may show it in their UI).
-    let _ = pamh.conv(
-        Some(&format!("faceauth: '{username}' please look at the camera ({camera_display}) ...")),
-        PamMsgStyle::TEXT_INFO,
-    );
-
-    const AUTH_TIMEOUT_SECS: u32 = 5;
-
-    // Show a desktop notification so the user knows to look at the camera.
-    let notif_id = match (uid, gid) {
-        (Some(u), Some(g)) => notify_start(u, g, &service, parent.as_deref().unwrap_or(""), AUTH_TIMEOUT_SECS),
-        _ => None,
+    let timeout = args.timeout_secs.unwrap_or_else(|| Config::load_system().0.timeout_secs);
+    let client = match Client::system(Duration::from_secs(u64::from(timeout) + 30)) {
+        Ok(c) => c,
+        Err(e) => return skip(&format!("system bus unavailable: {e}")),
     };
-
-    // Delegate authentication to the daemon: it owns the encoder and camera.
-    let result = authenticate_via_daemon(username, AUTH_TIMEOUT_SECS as u64);
-
-    // Replace the in-progress notification with the outcome.
-    if let (Some(u), Some(g), Some(id)) = (uid, gid, notif_id) {
-        let caller_str = parent.as_deref().unwrap_or("");
-        match &result {
-            Ok(())  => notify_result(u, g, id, true,  &service, caller_str),
-            Err(_)  => notify_result(u, g, id, false, &service, caller_str),
-        }
+    match gather_locality(pamh, &client).and_then(|l| check_locality(&l)) {
+        Ok(()) => {}
+        Err(reason) => return skip(&format!("not a local interactive session ({reason})")),
     }
 
-    match result {
+    let camera = match client.check_authentication(&username, &service) {
+        Ok(c) => c,
+        Err(e) => return skip(&e.message()),
+    };
+
+    log(pamh, LogLvl::NOTICE, &format!("[{service}] starting for {username} using {camera}"));
+    let _ = pamh.conv(Some(&format!("Look at the camera ({camera}) to authenticate...")), PamMsgStyle::TEXT_INFO);
+
+    match client.authenticate(&username, &service, timeout) {
         Ok(()) => {
-            let _ = pamh.syslog(LogLvl::NOTICE, &format!("[{caller}] face authentication succeeded for {user_desc} using {camera_desc}"));
-            let _ = pamh.conv(Some("faceauth: authentication successful"), PamMsgStyle::TEXT_INFO);
+            log(pamh, LogLvl::NOTICE, &format!("[{service}] succeeded for {username}"));
             PamError::SUCCESS
         }
-
-        // Any failure (timeout, camera error, dlib error, etc.): pass through
-        // to the next PAM module (e.g. pam_unix for password prompt).
         Err(e) => {
-            let _ = pamh.syslog(LogLvl::NOTICE, &format!("[{caller}] face authentication failed for {user_desc} using {camera_desc}, skipping: {e}"));
-            let _ = pamh.conv(Some(&format!("faceauth: authentication failed: {e}")), PamMsgStyle::ERROR_MSG);
+            let level = if matches!(e, Error::NoMatch(_)) { LogLvl::NOTICE } else { LogLvl::WARNING };
+            log(pamh, level, &format!("[{service}] failed for {username}: {e}"));
+            let _ = pamh.conv(Some(&format!("Face authentication failed: {e}")), PamMsgStyle::ERROR_MSG);
             PamError::AUTHINFO_UNAVAIL
         }
     }
@@ -383,25 +180,60 @@ pamsm::pam_module!(FaceAuthPam);
 mod tests {
     use super::*;
 
-    /// ppid_of(current pid) must return our own parent's PID (which is always > 0).
-    #[test]
-    fn ppid_of_current_process_is_nonzero() {
-        let ppid = ppid_of(std::process::id());
-        assert!(ppid.is_some(), "could not read /proc/self/status");
-        assert!(ppid.unwrap() > 0);
+    fn session(remote: bool, active: bool, seat: &str) -> SessionInfo {
+        SessionInfo { id: "2".into(), remote, active, seat: seat.into() }
     }
 
-    /// The test runner always has a parent process with a non-empty name.
-    #[test]
-    fn parent_process_name_is_nonempty() {
-        let name = parent_process_name();
-        assert!(name.is_some(), "could not read parent process name from /proc");
-        assert!(!name.unwrap().is_empty());
+    fn locality(session: Option<SessionInfo>) -> Locality {
+        Locality { rhost: None, session }
     }
 
-    /// has_sshd_ancestor must complete without panicking regardless of environment.
     #[test]
-    fn has_sshd_ancestor_does_not_panic() {
-        let _ = has_sshd_ancestor();
+    fn args_parse_timeout_and_reject_garbage() {
+        let a = parse_args(&["timeout=7".into(), "debug".into(), "timeout=999".into()]);
+        assert_eq!(a.timeout_secs, Some(7));
+        assert_eq!(a.unknown, vec!["debug", "timeout=999"]);
+    }
+
+    #[test]
+    fn remote_host_is_refused() {
+        let mut l = locality(Some(session(false, true, "seat0")));
+        l.rhost = Some("10.0.0.5".into());
+        assert!(check_locality(&l).is_err());
+        l.rhost = Some("  ".into());
+        assert!(check_locality(&l).is_err());
+        l.rhost = Some(String::new());
+        assert!(check_locality(&l).is_ok());
+    }
+
+    #[test]
+    fn local_foreground_session_is_accepted() {
+        assert!(check_locality(&locality(Some(session(false, true, "seat0")))).is_ok());
+    }
+
+    #[test]
+    fn ssh_style_sessions_are_refused() {
+        // SSH: remote flag set and no seat; holds for sudo inside SSH too.
+        assert!(check_locality(&locality(Some(session(true, true, "")))).is_err());
+        assert!(check_locality(&locality(Some(session(false, true, "")))).is_err());
+    }
+
+    #[test]
+    fn background_session_is_refused() {
+        assert!(check_locality(&locality(Some(session(false, false, "seat0")))).is_err());
+    }
+
+    #[test]
+    fn socket_peer_reads_unix_socket_credentials() {
+        use std::os::fd::AsRawFd;
+        let (a, _b) = std::os::unix::net::UnixStream::pair().unwrap();
+        assert_eq!(socket_peer(a.as_raw_fd()), Some((std::process::id(), users::current_uid())));
+        let file = std::fs::File::open("/proc/self/status").unwrap();
+        assert_eq!(socket_peer(file.as_raw_fd()), None);
+    }
+
+    #[test]
+    fn sessionless_caller_is_refused() {
+        assert!(check_locality(&locality(None)).is_err());
     }
 }

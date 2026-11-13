@@ -1,0 +1,52 @@
+[package]
+name = "dlib-face-recognition"
+version = "0.3.2"
+authors = [
+    "Ashley <expenses@airmail.cc>",
+    "Ho Kim <great.ho.kim@gmail.com>",
+    "João Pedro Sanches Dovichi <jsanchesdovichi@gmail.com>",
+]
+edition = "2021"
+
+description = "Unofficial Rust wrappers to the C++ library dlib, face recognition tools"
+homepage = "https://github.com/podo-os"
+repository = "https://github.com/podo-os/dlib-face-recognition"
+readme = "README.md"
+license = "BSD-3-Clause"
+
+build = "build.rs"
+
+include = ["src/**/*.rs", "build.rs", "Cargo.toml", "LICENSE"]
+
+[package.metadata.docs.rs]
+features = ["build-native"] # otherwise the build will fail in docs.rs
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+build-native = ["dlib-face-recognition-sys"]
+openblas = []
+
+embed-all = ["embed-fd-nn", "embed-fe-nn", "embed-lp"]
+embed-any = ["reqwest", "bzip2"]
+
+embed-fd-nn = ["embed-any"]
+embed-fe-nn = ["embed-any"]
+embed-lp = ["embed-any"]
+
+[dependencies]
+cpp = "0.5"
+dlib-face-recognition-sys = { path = "sys", version = "19.24.0-rc.1", default-features = false, optional = true }
+image = { version = "0.24", default-features = false }
+bzip2 = { version = "0.4", optional = true }
+reqwest = { version = "0.11", optional = true, features = ["blocking"] }
+
+[build-dependencies]
+cpp_build = "0.5"
+sys-info = "0.9"
+
+[dev-dependencies]
+lazy_static = "1.4"
+
+[workspace]
+members = [".", "./cv", "./sys"]

@@ -4,10 +4,12 @@
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: faceauth 0.1.0\n"
+"Project-Id-Version: faceauth 0.10.0\n"
 "Report-Msgid-Bugs-To: https://github.com/gvarsanyi/faceauth/issues\n"
+"POT-Creation-Date: 2026-11-12 22:34-0800\n"
 "PO-Revision-Date: 2024-01-01 00:00+0000\n"
-"Last-Translator: faceauth contributors <https://github.com/gvarsanyi/faceauth/issues>\n"
+"Last-Translator: faceauth contributors <https://github.com/gvarsanyi/"
+"faceauth/issues>\n"
 "Language-Team: German\n"
 "Language: de\n"
 "MIME-Version: 1.0\n"
@@ -15,158 +17,327 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=2; plural=(n != 1);\n"
 
-#: faceauth-cli/src/main.rs
-msgid "cannot determine username for current UID"
-msgstr "Benutzername für aktuelle UID konnte nicht ermittelt werden"
-
-#: faceauth-cli/src/main.rs
-msgid "'{user}' is already enrolled with {camera}; omit --camera to add another batch, or run 'faceauth clear' first to change cameras"
-msgstr "'{user}' ist bereits mit {camera} registriert; lassen Sie --camera weg, um einen weiteren Batch hinzuzufügen, oder führen Sie zuerst 'faceauth clear' aus, um die Kamera zu wechseln"
-
-#: faceauth-cli/src/main.rs
-msgid "enrolling face for '{user}'"
-msgstr "Gesicht für '{user}' wird registriert"
-
-#: faceauth-cli/src/main.rs
-msgid "look directly at the camera..."
-msgstr "Direkt in die Kamera schauen..."
-
-#: faceauth-cli/src/main.rs
-msgid "different angle"
-msgstr "anderer Winkel"
-
-#: faceauth-cli/src/main.rs
-msgid "[{done}/{total}] capturing...{hint}"
-msgstr "[{done}/{total}] Aufnahme läuft...{hint}"
-
-#: faceauth-cli/src/main.rs
-msgid "capture failed: {error}"
-msgstr "Aufnahme fehlgeschlagen: {error}"
-
-#: faceauth-cli/src/main.rs
-msgid "[{done}/{total}] too similar ({dist}) - adjust angle and hold still"
-msgstr "[{done}/{total}] zu ähnlich ({dist}) - Winkel anpassen und ruhig halten"
-
-#: faceauth-cli/src/main.rs
-msgid "enrollment failed: {error}"
-msgstr "Registrierung fehlgeschlagen: {error}"
-
-#: faceauth-cli/src/main.rs
-msgid "unexpected response from daemon"
-msgstr "Unerwartete Antwort vom Daemon"
-
-#: faceauth-cli/src/main.rs
-msgid "[{done}/{total}] captured"
-msgstr "[{done}/{total}] aufgenommen"
-
-#: faceauth-cli/src/main.rs
-msgid "Enrollment successful for '{user}'."
-msgstr "Registrierung für '{user}' erfolgreich."
-
-#: faceauth-cli/src/main.rs
-msgid "'{user}' please look at the camera ({camera}) ..."
-msgstr "'{user}' bitte in die Kamera schauen ({camera}) ..."
-
-#: faceauth-cli/src/main.rs
-msgid "authentication successful"
-msgstr "Authentifizierung erfolgreich"
-
-#: faceauth-cli/src/main.rs
-msgid "authentication failed: {error}"
-msgstr "Authentifizierung fehlgeschlagen: {error}"
-
-#: faceauth-cli/src/main.rs
-msgid "Model for '{user}' removed."
-msgstr "Modell für '{user}' wurde entfernt."
-
-#: faceauth-cli/src/main.rs
-msgid "clear failed: {error}"
-msgstr "Löschen fehlgeschlagen: {error}"
-
-#: faceauth-cli/src/main.rs
-msgid "User"
-msgstr "Benutzer"
-
-#: faceauth-cli/src/main.rs
-msgid "UID"
-msgstr "UID"
-
-#: faceauth-cli/src/main.rs
-msgid "Camera"
-msgstr "Kamera"
-
-#: faceauth-cli/src/main.rs
-msgid "Batches"
-msgstr "Batches"
-
-#: faceauth-cli/src/main.rs faceauth-cli/src/camera.rs
-msgid "no camera devices found"
-msgstr "Keine Kamerageräte gefunden"
-
-#: faceauth-cli/src/camera.rs
-msgid "IR, recommended"
-msgstr "IR, empfohlen"
-
-#: faceauth-cli/src/camera.rs
-msgid "possible IR"
-msgstr "möglicherweise IR"
-
-#: faceauth-cli/src/camera.rs
-msgid "(unknown)"
-msgstr "(unbekannt)"
-
-#: faceauth-cli/src/camera.rs
-msgid "Available cameras:"
-msgstr "Verfügbare Kameras:"
-
-#: faceauth-cli/src/camera.rs
-msgid "Select camera (default {index}): "
-msgstr "Kamera auswählen (Standard {index}): "
-
-#: faceauth-cli/src/camera.rs
-msgid "invalid selection '{input}'; expected one of: {options}"
-msgstr "Ungültige Auswahl '{input}'; erwartet eines von: {options}"
-
-#: faceauth-cli/src/camera.rs
-msgid "--camera is required in non-interactive mode"
-msgstr "--camera ist im nicht-interaktiven Modus erforderlich"
-
-#: faceauth-cli/src/camera.rs
-msgid "could not resolve camera path '{path}'"
-msgstr "Kamerapfad '{path}' konnte nicht aufgelöst werden"
-
-#: faceauth-cli/src/camera.rs
-msgid "'{spec}' is ambiguous - matches: {matches}; use a full path instead (e.g. --camera /dev/video{example})"
-msgstr "'{spec}' ist mehrdeutig - Treffer: {matches}; stattdessen vollständigen Pfad verwenden (z. B. --camera /dev/video{example})"
-
-#: faceauth-cli/src/camera.rs
-msgid "unrecognised camera '{spec}'; use an index, /dev/videoN path, or udev name"
-msgstr "Unbekannte Kamera '{spec}'; bitte Index, /dev/videoN-Pfad oder udev-Namen verwenden"
-
-#: faceauth-cli/src/main.rs
-msgid "capture failed: invalid encoding from daemon"
-msgstr "Aufnahme fehlgeschlagen: Ungültige Kodierung vom Daemon"
-
-#: faceauth-cli/src/main.rs
-msgid "capture failed: unexpected response from daemon"
-msgstr "Aufnahme fehlgeschlagen: Unerwartete Antwort vom Daemon"
-
-#: faceauth-notify/src/main.rs
-msgid "Face Authentication ..."
-msgstr "Gesichtserkennung ..."
-
-#: faceauth-notify/src/main.rs
-msgid "Requested by: {service}"
-msgstr "Angefordert von: {service}"
-
-#: faceauth-notify/src/main.rs
+#: faceauth-agent/src/main.rs:110
+#, rust-format
 msgid "Requested by: {service} via {caller}"
 msgstr "Angefordert von: {service} über {caller}"
 
-#: faceauth-notify/src/main.rs
+#: faceauth-agent/src/main.rs:113
+#, rust-format
+msgid "Requested by: {service}"
+msgstr "Angefordert von: {service}"
+
+#: faceauth-agent/src/main.rs:156
+msgid "Face Authentication ..."
+msgstr "Gesichtserkennung ..."
+
+#: faceauth-agent/src/main.rs:176
 msgid "Face Authentication Successful"
 msgstr "Gesichtserkennung erfolgreich"
 
-#: faceauth-notify/src/main.rs
+#: faceauth-agent/src/main.rs:178
 msgid "Face Authentication Failed"
 msgstr "Gesichtserkennung fehlgeschlagen"
+
+#: faceauth-cli/src/main.rs:132 faceauth-gtk/src/main.rs:138
+msgid "IR, recommended"
+msgstr "IR, empfohlen"
+
+#: faceauth-cli/src/main.rs:133
+msgid "possible IR"
+msgstr "möglicherweise IR"
+
+#: faceauth-cli/src/main.rs:142
+msgid "(unknown)"
+msgstr "(unbekannt)"
+
+#: faceauth-cli/src/main.rs:181
+#, rust-format
+msgid "unrecognised camera '{spec}'"
+msgstr "Unbekannte Kamera '{spec}'"
+
+#: faceauth-cli/src/main.rs:188 faceauth-cli/src/main.rs:322
+msgid "no camera devices found"
+msgstr "Keine Kamerageräte gefunden"
+
+#: faceauth-cli/src/main.rs:191
+msgid "--camera is required in non-interactive mode"
+msgstr "--camera ist im nicht-interaktiven Modus erforderlich"
+
+#: faceauth-cli/src/main.rs:193
+msgid "Available cameras:"
+msgstr "Verfügbare Kameras:"
+
+#: faceauth-cli/src/main.rs:197
+#, rust-format
+msgid "Select camera (default {index}): "
+msgstr "Kamera auswählen (Standard {index}): "
+
+#: faceauth-cli/src/main.rs:208
+#, rust-format
+msgid "invalid selection '{input}'"
+msgstr "Ungültige Auswahl '{input}'"
+
+#: faceauth-cli/src/main.rs:229
+msgid ""
+"warning: this is not an IR camera; a photo of you may be able to unlock it"
+msgstr ""
+"Warnung: Dies ist keine IR-Kamera; ein Foto von Ihnen könnte zum Entsperren "
+"genügen"
+
+#: faceauth-cli/src/main.rs:235
+#, rust-format
+msgid "enrolling face for '{user}'; look at the camera and vary your angle"
+msgstr ""
+"Gesicht für '{user}' wird registriert; bitte in die Kamera schauen und den "
+"Blickwinkel variieren"
+
+#: faceauth-cli/src/main.rs:241
+#, rust-format
+msgid ""
+"[{done}/{total}] too similar to a previous capture; turn your head slightly"
+msgstr ""
+"[{done}/{total}] zu ähnlich zu einer vorherigen Aufnahme; Kopf leicht drehen"
+
+#: faceauth-cli/src/main.rs:243
+#, rust-format
+msgid "[{done}/{total}] captured"
+msgstr "[{done}/{total}] aufgenommen"
+
+#: faceauth-cli/src/main.rs:254
+#, rust-format
+msgid "Enrollment successful for '{user}'."
+msgstr "Registrierung für '{user}' erfolgreich."
+
+#: faceauth-cli/src/main.rs:262
+#, rust-format
+msgid "look at the camera ({camera}) ..."
+msgstr "bitte in die Kamera schauen ({camera}) ..."
+
+#: faceauth-cli/src/main.rs:265
+msgid "authentication successful"
+msgstr "Authentifizierung erfolgreich"
+
+#: faceauth-cli/src/main.rs:266
+#, rust-format
+msgid "authentication failed: {error}"
+msgstr "Authentifizierung fehlgeschlagen: {error}"
+
+#: faceauth-cli/src/main.rs:272
+#, rust-format
+msgid "Delete enrollment batch {batch} of '{user}'?"
+msgstr "Aufnahmeserie {batch} von '{user}' löschen?"
+
+#: faceauth-cli/src/main.rs:274
+#, rust-format
+msgid "Delete all face data of '{user}'?"
+msgstr "Alle Gesichtsdaten von '{user}' löschen?"
+
+#: faceauth-cli/src/main.rs:278
+msgid "not confirmed; use --yes to skip the question"
+msgstr "nicht bestätigt; mit --yes wird die Rückfrage übersprungen"
+
+#: faceauth-cli/src/main.rs:287
+#, rust-format
+msgid "Face data of '{user}' removed."
+msgstr "Gesichtsdaten von '{user}' wurden entfernt."
+
+#: faceauth-cli/src/main.rs:301
+msgid "User"
+msgstr "Benutzer"
+
+#: faceauth-cli/src/main.rs:303
+msgid "UID"
+msgstr "UID"
+
+#: faceauth-cli/src/main.rs:307
+msgid "not connected"
+msgstr "nicht angeschlossen"
+
+#: faceauth-cli/src/main.rs:309 faceauth-gtk/src/main.rs:324
+msgid "Camera"
+msgstr "Kamera"
+
+#: faceauth-cli/src/main.rs:310
+msgid "Batches"
+msgstr "Batches"
+
+#: faceauth-cli/src/main.rs:339 faceauth-gtk/src/main.rs:159
+msgid ""
+"No services are enabled by the administrator (/etc/faceauth/faceauth.conf)."
+msgstr ""
+"Der Administrator hat keine Dienste freigegeben (/etc/faceauth/"
+"faceauth.conf)."
+
+#: faceauth-cli/src/main.rs:345
+msgid "enabled "
+msgstr "aktiv   "
+
+#: faceauth-cli/src/main.rs:347
+msgid "disabled"
+msgstr "inaktiv "
+
+#: faceauth-cli/src/main.rs:360
+#, rust-format
+msgid "face authentication enabled for '{service}' (user '{user}')."
+msgstr ""
+"Gesichtsauthentifizierung für '{service}' aktiviert (Benutzer '{user}')."
+
+#: faceauth-cli/src/main.rs:362
+#, rust-format
+msgid "face authentication disabled for '{service}' (user '{user}')."
+msgstr ""
+"Gesichtsauthentifizierung für '{service}' deaktiviert (Benutzer '{user}')."
+
+#: faceauth-cli/src/main.rs:400
+msgid "cannot determine username for current UID"
+msgstr "Benutzername für aktuelle UID konnte nicht ermittelt werden"
+
+#: faceauth-gtk/src/main.rs:59
+msgid "internal error (worker thread panicked)"
+msgstr "interner Fehler (Arbeitsthread abgestürzt)"
+
+#: faceauth-gtk/src/main.rs:60
+msgid "cannot connect to the system bus"
+msgstr "keine Verbindung zum Systembus"
+
+#: faceauth-gtk/src/main.rs:93
+#, rust-format
+msgid "{n} enrollment batch"
+msgid_plural "{n} enrollment batches"
+msgstr[0] "{n} Registrierungsdurchgang"
+msgstr[1] "{n} Registrierungsdurchgänge"
+
+#: faceauth-gtk/src/main.rs:97
+msgid "the enrolled camera is not connected"
+msgstr "die registrierte Kamera ist nicht angeschlossen"
+
+#: faceauth-gtk/src/main.rs:100
+msgid "No face enrolled"
+msgstr "Kein Gesicht registriert"
+
+#: faceauth-gtk/src/main.rs:109
+msgid "Add More"
+msgstr "Weitere hinzufügen"
+
+#: faceauth-gtk/src/main.rs:109 faceauth-gtk/src/main.rs:325
+msgid "Enroll"
+msgstr "Registrieren"
+
+#: faceauth-gtk/src/main.rs:161
+msgid ""
+"Never used for remote sessions (SSH, remote desktop) or sessions in the "
+"background."
+msgstr ""
+"Nie verwendet für entfernte Sitzungen (SSH, Remote-Desktop) oder Sitzungen "
+"im Hintergrund."
+
+#: faceauth-gtk/src/main.rs:197 faceauth-gtk/src/main.rs:239
+msgid "Look at the camera and turn your head slightly between captures."
+msgstr ""
+"In die Kamera schauen und den Kopf zwischen den Aufnahmen leicht drehen."
+
+#: faceauth-gtk/src/main.rs:201 faceauth-gtk/src/main.rs:283
+msgid "Cancel"
+msgstr "Abbrechen"
+
+#: faceauth-gtk/src/main.rs:217
+msgid "Enroll Face"
+msgstr "Gesicht registrieren"
+
+#: faceauth-gtk/src/main.rs:237
+msgid "Too similar to a previous capture; turn your head slightly."
+msgstr "Zu ähnlich zu einer vorherigen Aufnahme; den Kopf leicht drehen."
+
+#: faceauth-gtk/src/main.rs:256
+msgid "Enrollment complete"
+msgstr "Registrierung abgeschlossen"
+
+#: faceauth-gtk/src/main.rs:266
+msgid "Look at the camera..."
+msgstr "Bitte in die Kamera schauen..."
+
+#: faceauth-gtk/src/main.rs:271
+msgid "Face recognized"
+msgstr "Gesicht erkannt"
+
+#: faceauth-gtk/src/main.rs:273
+#, rust-format
+msgid "Not recognized: {error}"
+msgstr "Nicht erkannt: {error}"
+
+#: faceauth-gtk/src/main.rs:280
+msgid "Delete Face Data?"
+msgstr "Gesichtsdaten löschen?"
+
+#: faceauth-gtk/src/main.rs:281
+msgid ""
+"All enrolled face data is removed. You need to enroll again to use face "
+"authentication."
+msgstr ""
+"Alle registrierten Gesichtsdaten werden entfernt. Für die "
+"Gesichtsauthentifizierung ist danach eine erneute Registrierung nötig."
+
+#: faceauth-gtk/src/main.rs:283 faceauth-gtk/src/main.rs:327
+msgid "Delete"
+msgstr "Löschen"
+
+#: faceauth-gtk/src/main.rs:303
+msgid "Administrator commands in a terminal"
+msgstr "Administratorbefehle im Terminal"
+
+#: faceauth-gtk/src/main.rs:304
+msgid "Administrator login shells (sudo -i)"
+msgstr "Administrator-Login-Shells (sudo -i)"
+
+#: faceauth-gtk/src/main.rs:305
+msgid "Authorization prompts of applications"
+msgstr "Autorisierungsabfragen von Anwendungen"
+
+#: faceauth-gtk/src/main.rs:306
+msgid "KDE Plasma lock screen"
+msgstr "KDE-Plasma-Sperrbildschirm"
+
+#: faceauth-gtk/src/main.rs:307
+msgid "Screen unlock (not used for login)"
+msgstr "Bildschirm entsperren (nicht zur Anmeldung)"
+
+#: faceauth-gtk/src/main.rs:308
+msgid "Text console login"
+msgstr "Anmeldung an der Textkonsole"
+
+#: faceauth-gtk/src/main.rs:309
+msgid "Switching user (su)"
+msgstr "Benutzerwechsel (su)"
+
+#: faceauth-gtk/src/main.rs:319
+msgid "The face authentication service is not available"
+msgstr "Der Dienst für die Gesichtsauthentifizierung ist nicht verfügbar"
+
+#: faceauth-gtk/src/main.rs:320
+msgid "Retry"
+msgstr "Erneut versuchen"
+
+#: faceauth-gtk/src/main.rs:323
+msgid "Face data"
+msgstr "Gesichtsdaten"
+
+#: faceauth-gtk/src/main.rs:326
+msgid "Test"
+msgstr "Testen"
+
+#: faceauth-gtk/src/main.rs:333
+msgid "Face"
+msgstr "Gesicht"
+
+#: faceauth-gtk/src/main.rs:337
+msgid "Use Face Authentication For"
+msgstr "Gesichtsauthentifizierung verwenden für"
+
+#: faceauth-gtk/src/main.rs:345
+msgid "Reload"
+msgstr "Neu laden"
+
+#: faceauth-gtk/src/main.rs:355
+msgid "Face Authentication"
+msgstr "Gesichtsauthentifizierung"

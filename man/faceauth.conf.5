@@ -1,0 +1,67 @@
+.TH FACEAUTH.CONF 5 "2026-11" "faceauth 0.10.0" "File Formats"
+.SH NAME
+faceauth.conf \- face authentication configuration
+.SH SYNOPSIS
+.I /etc/faceauth/faceauth.conf
+.SH DESCRIPTION
+One
+.I key
+=
+.I value
+per line;
+.B #
+starts a comment. Missing keys use their defaults. Unknown keys and invalid
+values are ignored and reported by
+.B faceauth doctor
+and in the daemon log. The file is read on every request; no restart is
+needed.
+.SH OPTIONS
+.TP
+.B services
+PAM services that may use face authentication, separated by commas or
+spaces. Users can disable these for themselves but cannot add others. The
+service's PAM stack must also load
+.BR pam_faceauth (8);
+run
+.B faceauth-setup configure
+(in the libexec directory) as root after changing this list to add it.
+An empty value disables face authentication everywhere. Default:
+.BR "sudo, sudo-i, polkit-1, kde-fingerprint" .
+Graphical login screens
+.RB ( gdm-password ,
+.BR sddm ,
+.BR lightdm ,
+.BR cosmic-greeter )
+are only used to unlock the user's locked session, never to log in: a face
+login does not provide the password needed to unlock keyrings, KWallet, or
+encrypted home directories. On GNOME, listing
+.B gdm-password
+enables face unlock; when the face is not recognized, the password prompt
+appears only after
+.BR timeout .
+.TP
+.B threshold
+Largest distance between a live face and an enrolled face that counts as a
+match, 0.2 to 0.6. Lower values reject more impostors and more genuine
+attempts. Default: 0.45.
+.TP
+.B required_matches
+Consecutive frames that must each contain exactly one matching face, 1 to 10.
+A frame with no face, several faces, or another face resets the count.
+Default: 3.
+.TP
+.B timeout
+Default authentication timeout in seconds, 1 to 30. Default: 5.
+.TP
+.B require_ir
+.B yes
+refuses cameras that are not greyscale-only (IR). Colour cameras can be
+fooled by a photograph. Default: no.
+.SH SECURITY
+Face matching is a convenience factor, not a replacement for a strong
+password. faceauth performs no liveness detection; an IR camera raises the
+bar considerably but is not proof against a determined attacker.
+.SH SEE ALSO
+.BR faceauth (1),
+.BR faceauth-daemon (8),
+.BR pam_faceauth (8)

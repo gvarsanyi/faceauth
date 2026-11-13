@@ -1,50 +1,46 @@
-use std::path::PathBuf;
+//! dlib face detection and 128-D descriptor extraction.
+
+use std::fs::File;
+use std::io::Write;
+use std::os::fd::{AsRawFd, FromRawFd};
 
 use dlib_face_recognition::{
-    FaceDetector, FaceDetectorTrait, FaceEncoderNetwork, FaceEncoderTrait, FaceEncoding,
-    ImageMatrix, LandmarkPredictor, LandmarkPredictorTrait,
+    FaceDetector, FaceDetectorTrait, FaceEncoderNetwork, FaceEncoderTrait, FaceEncoding, ImageMatrix,
+    LandmarkPredictor, LandmarkPredictorTrait,
 };
 
 use crate::error::{FaceAuthError, Result};
 
-/// Euclidean distance below which two encodings are considered the same person.
-/// 0.6 matches the threshold used in dlib's own documentation.
-pub const DISTANCE_THRESHOLD: f64 = 0.6;
+/// A 128-dimensional face descriptor.
+pub type Encoding = [f32; 128];
 
-/// The dlib model files are embedded in the binary at compile time by build.rs,
-/// which downloads them from dlib.net if not present under `faceauth-core/models/`.
-static SHAPE_PREDICTOR_BYTES: &[u8] =
-    include_bytes!("../models/shape_predictor_5_face_landmarks.dat");
-static RECOGNITION_MODEL_BYTES: &[u8] =
-    include_bytes!("../models/dlib_face_recognition_resnet_model_v1.dat");
+/// Model files verified and decompressed by build.rs (see models/README.md).
+static SHAPE_PREDICTOR: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/shape_predictor_5_face_landmarks.dat"));
+static RECOGNITION_MODEL: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/dlib_face_recognition_resnet_model_v1.dat"));
 
-/// Directory where embedded model bytes are extracted so dlib can open them.
-/// `/tmp` is world-writable, cleaned on reboot, and appropriate for non-secret
-/// model weights.  A versioned subdirectory prevents stale-file collisions
-/// across binary updates.
-const EXTRACT_DIR: &str = concat!("/tmp/faceauth-models-", env!("CARGO_PKG_VERSION"));
-
-/// Extract an embedded model file to `EXTRACT_DIR/<filename>` if it is not
-/// already there, and return the path.
-fn extract_model(filename: &str, data: &[u8]) -> Result<PathBuf> {
-    let dir = std::path::Path::new(EXTRACT_DIR);
-    std::fs::create_dir_all(dir).map_err(|e| {
-        FaceAuthError::Dlib(format!("failed to create model extraction dir: {e}"))
-    })?;
-
-    let path = dir.join(filename);
-    if !path.exists() {
-        std::fs::write(&path, data).map_err(|e| {
-            FaceAuthError::Dlib(format!("failed to extract {filename}: {e}"))
-        })?;
+/// Copy `data` into an anonymous memory file. dlib can only load models from
+/// a path, so the caller opens `/proc/self/fd/<fd>` while the file is alive.
+/// Nothing is written to the filesystem.
+fn memfd_with(name: &str, data: &[u8]) -> Result<File> {
+    let cname = std::ffi::CString::new(name).map_err(|e| FaceAuthError::Dlib(e.to_string()))?;
+    // SAFETY: valid C string; MFD_CLOEXEC keeps the fd out of child processes.
+    let fd = unsafe { libc::memfd_create(cname.as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        return Err(FaceAuthError::Storage(std::io::Error::last_os_error()));
     }
-    Ok(path)
+    // SAFETY: fd is a fresh descriptor that we own.
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    file.write_all(data)?;
+    Ok(file)
 }
 
-/// Loaded dlib model handles.
-///
-/// Construction is expensive (reads ~30 MB of model data from disk and
-/// initialises the network). Create once per process and reuse.
+fn fd_path(file: &File) -> String {
+    format!("/proc/self/fd/{}", file.as_raw_fd())
+}
+
+/// Loaded dlib model handles. Construction parses ~30 MB of model data;
+/// create once per process and reuse.
 pub struct FaceEncoder {
     detector: FaceDetector,
     predictor: LandmarkPredictor,
@@ -52,109 +48,63 @@ pub struct FaceEncoder {
 }
 
 impl FaceEncoder {
-    /// Initialise the face encoder using the models embedded in the binary.
-    ///
-    /// On first call the model bytes are extracted to `EXTRACT_DIR`; subsequent
-    /// calls (same binary version) reuse the already-extracted files.
-    ///
-    /// # Errors
-    /// Returns [`FaceAuthError::Dlib`] if the model files cannot be extracted
-    /// or loaded by dlib.
+    /// Load the embedded models.
     pub fn new() -> Result<Self> {
-        let detector = FaceDetector::new();
-
-        let predictor_path = extract_model(
-            "shape_predictor_5_face_landmarks.dat",
-            SHAPE_PREDICTOR_BYTES,
-        )?;
-        let predictor = LandmarkPredictor::open(&predictor_path)
-            .map_err(FaceAuthError::Dlib)?;
-
-        let encoder_path = extract_model(
-            "dlib_face_recognition_resnet_model_v1.dat",
-            RECOGNITION_MODEL_BYTES,
-        )?;
-        let encoder = FaceEncoderNetwork::open(&encoder_path)
-            .map_err(FaceAuthError::Dlib)?;
-
-        Ok(Self {
-            detector,
-            predictor,
-            encoder,
-        })
+        let predictor_file = memfd_with("shape_predictor", SHAPE_PREDICTOR)?;
+        let predictor = LandmarkPredictor::open(fd_path(&predictor_file)).map_err(FaceAuthError::Dlib)?;
+        let encoder_file = memfd_with("recognition_model", RECOGNITION_MODEL)?;
+        let encoder = FaceEncoderNetwork::open(fd_path(&encoder_file)).map_err(FaceAuthError::Dlib)?;
+        Ok(Self { detector: FaceDetector::new(), predictor, encoder })
     }
 
-    /// Detect all faces in an RGB frame and return their 128-D encodings.
-    ///
-    /// `data` must be packed RGB888 (3 bytes per pixel, row-major).
-    /// Returns an empty `Vec` if no faces are detected.
-    ///
-    /// # Errors
-    /// Returns [`FaceAuthError::Dlib`] if an encoding has an unexpected
-    /// dimensionality (should never happen with a valid dlib build).
-    pub fn encode_faces(&self, data: &[u8], width: u32, height: u32) -> Result<Vec<[f32; 128]>> {
-        let matrix = unsafe { ImageMatrix::new(width as usize, height as usize, data.as_ptr()) };
-
-        let locations = self.detector.face_locations(&matrix);
-
-        if locations.is_empty() {
-            return Ok(Vec::new());
+    /// Detect all faces in a packed RGB888 frame and return their encodings.
+    pub fn encode_faces(&self, rgb: &[u8], width: u32, height: u32) -> Result<Vec<Encoding>> {
+        let expected = width as usize * height as usize * 3;
+        if rgb.len() < expected {
+            return Err(FaceAuthError::Camera(format!("short frame: {} < {expected} bytes", rgb.len())));
         }
-
-        let mut results = Vec::with_capacity(locations.len());
-
-        for location in locations.iter() {
-            let landmarks = self
-                .predictor
-                .face_landmarks(&matrix, location);
-
-            let encodings = self
-                .encoder
-                .get_face_encodings(&matrix, &[landmarks], 0);
-
-            for encoding in encodings.iter() {
-                results.push(Self::encoding_to_array(encoding)?);
+        // SAFETY: `rgb` holds at least width*height*3 bytes (checked above)
+        // and outlives `matrix`.
+        let matrix = unsafe { ImageMatrix::new(width as usize, height as usize, rgb.as_ptr()) };
+        let mut results = Vec::new();
+        for location in self.detector.face_locations(&matrix).iter() {
+            let landmarks = self.predictor.face_landmarks(&matrix, location);
+            for encoding in self.encoder.get_face_encodings(&matrix, &[landmarks], 0).iter() {
+                results.push(to_array(encoding)?);
             }
         }
-
         Ok(results)
     }
+}
 
-    /// Convert a dlib `FaceEncoding` (128 × f64) to a `[f32; 128]`.
-    fn encoding_to_array(enc: &FaceEncoding) -> Result<[f32; 128]> {
-        let slice: &[f64] = enc.as_ref();
-        if slice.len() != 128 {
-            return Err(FaceAuthError::Dlib(format!(
-                "expected 128-dimensional encoding, got {}",
-                slice.len()
-            )));
-        }
-        let mut arr = [0f32; 128];
-        for (dst, &src) in arr.iter_mut().zip(slice.iter()) {
-            *dst = src as f32;
-        }
-        Ok(arr)
+/// Convert a dlib descriptor (128 x f64) to `[f32; 128]`.
+fn to_array(enc: &FaceEncoding) -> Result<Encoding> {
+    let slice: &[f64] = enc.as_ref();
+    if slice.len() != 128 {
+        return Err(FaceAuthError::Dlib(format!("expected 128-dimensional encoding, got {}", slice.len())));
     }
+    let mut arr = [0f32; 128];
+    for (dst, &src) in arr.iter_mut().zip(slice) {
+        *dst = src as f32;
+    }
+    Ok(arr)
+}
 
-    /// Euclidean (L2) distance between two 128-D face encodings.
-    pub fn distance(a: &[f32; 128], b: &[f32; 128]) -> f64 {
-        a.iter()
-            .zip(b.iter())
-            .map(|(&x, &y)| {
-                let d = (x as f64) - (y as f64);
-                d * d
-            })
-            .sum::<f64>()
-            .sqrt()
-    }
+/// Euclidean distance between two descriptors.
+pub fn distance(a: &Encoding, b: &Encoding) -> f64 {
+    a.iter()
+        .zip(b)
+        .map(|(&x, &y)| {
+            let d = f64::from(x) - f64::from(y);
+            d * d
+        })
+        .sum::<f64>()
+        .sqrt()
+}
 
-    /// Returns true if `live` is within `DISTANCE_THRESHOLD` of any
-    /// encoding stored in `model_encodings`.
-    pub fn matches_model(live: &[f32; 128], model_encodings: &[[f32; 128]]) -> bool {
-        model_encodings
-            .iter()
-            .any(|stored| Self::distance(live, stored) < DISTANCE_THRESHOLD)
-    }
+/// Smallest distance from `live` to any of `stored` (`f64::INFINITY` if empty).
+pub fn min_distance(live: &Encoding, stored: &[Encoding]) -> f64 {
+    stored.iter().map(|s| distance(live, s)).fold(f64::INFINITY, f64::min)
 }
 
 #[cfg(test)]
@@ -162,62 +112,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn distance_identical() {
+    fn distance_basics() {
         let a = [0.5f32; 128];
-        assert!(FaceEncoder::distance(&a, &a) < 1e-9);
+        assert!(distance(&a, &a) < 1e-9);
+        let mut b = [0.0f32; 128];
+        b[0] = 3.0;
+        assert!((distance(&[0.0; 128], &b) - 3.0).abs() < 1e-6);
+        assert!((distance(&a, &b) - distance(&b, &a)).abs() < 1e-9);
     }
 
     #[test]
-    fn distance_above_threshold() {
-        let a = [0.0f32; 128];
-        let b = [1.0f32; 128];
-        // distance = sqrt(128 * 1^2) = sqrt(128) ≈ 11.3, well above 0.6
-        assert!(FaceEncoder::distance(&a, &b) > DISTANCE_THRESHOLD);
-    }
-
-    #[test]
-    fn matches_model_hit() {
-        let enc = [0.1f32; 128];
-        let stored = vec![enc];
-        assert!(FaceEncoder::matches_model(&enc, &stored));
-    }
-
-    #[test]
-    fn matches_model_miss() {
-        let a = [0.0f32; 128];
-        let b = [1.0f32; 128];
-        assert!(!FaceEncoder::matches_model(&a, &[b]));
-    }
-
-    #[test]
-    fn distance_symmetric() {
-        let a = [0.1f32; 128];
-        let mut b = [0.5f32; 128];
-        b[0] = 0.0;
-        assert!((FaceEncoder::distance(&a, &b) - FaceEncoder::distance(&b, &a)).abs() < 1e-9);
-    }
-
-    #[test]
-    fn distance_known_value() {
-        // Only one component differs by 3; distance = sqrt(3²) = 3.0 exactly.
-        let mut a = [0.0f32; 128];
-        let b = [0.0f32; 128];
-        a[0] = 3.0;
-        assert!((FaceEncoder::distance(&a, &b) - 3.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn matches_model_empty_slice() {
+    fn min_distance_picks_closest() {
         let live = [0.1f32; 128];
-        assert!(!FaceEncoder::matches_model(&live, &[]));
+        assert_eq!(min_distance(&live, &[]), f64::INFINITY);
+        assert!(min_distance(&live, &[[1.0; 128], live]) < 1e-9);
     }
 
     #[test]
-    fn matches_model_multiple_one_hit() {
-        let live = [0.1f32; 128];
-        let miss = [1.0f32; 128]; // distance ≈ 11.3, well above threshold
-        let hit = live;           // distance = 0.0
-        // one miss followed by a hit — any() should still return true
-        assert!(FaceEncoder::matches_model(&live, &[miss, hit]));
+    fn memfd_roundtrip() {
+        let file = memfd_with("test", b"hello").unwrap();
+        assert_eq!(std::fs::read(fd_path(&file)).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn embedded_models_are_present() {
+        assert!(SHAPE_PREDICTOR.len() > 1_000_000);
+        assert!(RECOGNITION_MODEL.len() > 10_000_000);
     }
 }

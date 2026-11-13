@@ -1,0 +1,3 @@
+# sysusers.d(5) entry for the faceauth daemon account.
+u faceauthd - "faceauth daemon" - -
+m faceauthd video

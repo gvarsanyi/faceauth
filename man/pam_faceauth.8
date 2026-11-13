@@ -1,0 +1,79 @@
+.TH PAM_FACEAUTH 8 "2026-11" "faceauth 0.10.0" "Linux-PAM Manual"
+.SH NAME
+pam_faceauth \- PAM module for face authentication
+.SH SYNOPSIS
+.B auth sufficient pam_faceauth.so
+.RI [ timeout=N ]
+.SH DESCRIPTION
+.B pam_faceauth
+asks
+.BR faceauth-daemon (8)
+to match the face of
+.B PAM_USER
+against that user's enrolled face data. On a match it returns
+.BR PAM_SUCCESS ;
+on every other outcome it returns
+.B PAM_AUTHINFO_UNAVAIL
+so the stack continues with the next module, normally the password prompt.
+.PP
+The module is skipped without opening the camera when:
+.IP \(bu 2
+.B PAM_RHOST
+is set (remote login);
+.IP \(bu 2
+the session of the calling process is remote, has no seat, or is not the
+foreground session (SSH, including sudo inside SSH; remote desktop;
+switched-away users). A process outside any logind session (for example a
+terminal started by the systemd user manager) is judged instead by the
+session of the process connected to its standard input, if that is a Unix
+socket (polkit's socket-activated agent helper, connected to the user's
+polkit agent), or else by the invoking user's graphical session, as polkit
+does;
+.IP \(bu 2
+neither exists (cron jobs, system services);
+.IP \(bu 2
+the PAM service is not listed in
+.BR faceauth.conf (5)
+or the user disabled it;
+.IP \(bu 2
+the service is a graphical login screen
+.RB ( gdm-password ", " gdm-autologin ", " sddm ", " lightdm ", " cosmic-greeter )
+and the user's session is not locked: these only unlock;
+.IP \(bu 2
+the user has no enrolled face, the enrolled camera is not connected, is
+virtual, or is not IR while
+.B require_ir
+is set.
+.PP
+After repeated immediate failures (a lock screen retrying), the daemon waits
+up to 20 seconds before turning on the camera.
+.PP
+The module connects to the system bus at its fixed socket path and ignores
+.BR DBUS_SYSTEM_BUS_ADDRESS ,
+which is controlled by the invoking user in setuid programs.
+.PP
+The module starts no processes. While the camera runs, the user's session
+agent (faceauth-agent, started by XDG autostart) shows a desktop
+notification on the daemon's behalf.
+.SH OPTIONS
+.TP
+.BI timeout= N
+Authentication timeout in seconds (1 to 30). Default: the
+.B timeout
+setting of
+.BR faceauth.conf (5).
+.SH MODULE TYPES PROVIDED
+.B auth
+only.
+.B pam_setcred
+returns success and does nothing.
+.SH EXAMPLES
+.nf
+# /etc/pam.d/sudo, before the password module
+auth  sufficient  pam_faceauth.so
+.fi
+.SH SEE ALSO
+.BR faceauth (1),
+.BR faceauth.conf (5),
+.BR faceauth-daemon (8),
+.BR pam (8)

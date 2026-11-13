@@ -1,0 +1,7 @@
+# D-Bus activation for faceauth-daemon. Installed to
+# /usr/share/dbus-1/system-services/; the daemon starts on first use.
+[D-BUS Service]
+Name=io.github.gvarsanyi.FaceAuth1
+Exec=@LIBEXECDIR@/faceauth-daemon
+User=faceauthd
+SystemdService=faceauth-daemon.service

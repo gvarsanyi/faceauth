@@ -1,0 +1,80 @@
+.TH FACEAUTH 1 "2026-11" "faceauth 0.10.0" "User Commands"
+.SH NAME
+faceauth \- manage face authentication
+.SH SYNOPSIS
+.B faceauth
+.RB [ \-u
+.IR user ]
+.I command
+.RI [ options ]
+.SH DESCRIPTION
+.B faceauth
+enrolls, tests, and removes face data and chooses which services use face
+authentication. All work is done by
+.BR faceauth-daemon (8)
+over D-Bus. Commands that change data ask for your password through polkit;
+in a terminal a text prompt is shown.
+.SH COMMANDS
+.TP
+.BR add " [" \-c\ \fIcamera\fR ]
+Capture a new enrollment batch of five face images from different angles.
+On the first enrollment, choose the camera by index (2), device path
+(/dev/video2), or udev name from /dev/v4l/by-id or /dev/v4l/by-path; without
+.B \-c
+you are prompted. Later enrollments reuse the enrolled camera.
+.TP
+.BR test " [" \-t\ \fIseconds\fR ]
+Try to recognize you. Exit status 0 on success. Requires a local, foreground
+session;
+.I seconds
+is capped at 30 (default:
+.B timeout
+from
+.BR faceauth.conf (5)).
+.TP
+.BR clear " [" \-b\ \fIbatch\fR "] [" \-y ]
+Delete all face data, or one enrollment batch. Asks for confirmation unless
+.B \-y
+is given.
+.TP
+.BR info " [" \-\-json ]
+Show the enrolled camera and number of batches.
+.TP
+.BR cameras " [" \-\-json ]
+List cameras. IR (greyscale-only) cameras are marked; they are much harder to
+fool with a photo.
+.TP
+.BR "service list" " [" \-\-json ]
+.TQ
+.BI "service enable " name
+.TQ
+.BI "service disable " name
+Show or change which PAM services use face authentication for you. Only
+services listed by the administrator in
+.BR faceauth.conf (5)
+can be enabled.
+.TP
+.BR doctor " [" \-\-json ]
+Check configuration, PAM wiring, cameras, the notification agent, the
+daemon, your enrollment and services, and whether sudo authenticates root
+(targetpw). Exit status 1 if a check fails.
+.SH OPTIONS
+.TP
+.BR \-u ", " \-\-user " \fIuser\fR"
+Operate on another account. Reading it
+.RB ( info ", " "service list" ", " test )
+requires root; changing it
+.RB ( add ", " clear ", " "service enable" / disable )
+requires administrator authorization (polkit
+.BR manage-other ).
+.SH ENVIRONMENT
+.TP
+.B FACEAUTH_BUS=session
+Talk to a development daemon on the session bus
+.RB ( "faceauth-daemon \-\-session-bus" ).
+.SH EXIT STATUS
+0 on success, 1 on failure, 2 on usage errors.
+.SH SEE ALSO
+.BR faceauth.conf (5),
+.BR faceauth-daemon (8),
+.BR pam_faceauth (8)

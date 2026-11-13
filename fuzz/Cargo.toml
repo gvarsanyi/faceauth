@@ -1,0 +1,38 @@
+# Fuzz targets for faceauth's parsers. Requires nightly and cargo-fuzz:
+#   cargo +nightly fuzz run config
+#   cargo +nightly fuzz run model_json
+[package]
+name = "faceauth-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+faceauth-common = { path = "../faceauth-common" }
+faceauth-core = { path = "../faceauth-core" }
+
+# Separate workspace: built only by cargo-fuzz, with nightly.
+[workspace]
+
+[patch.crates-io]
+nokhwa-bindings-linux = { path = "../vendor/nokhwa-bindings-linux" }
+dlib-face-recognition = { path = "../vendor/dlib-face-recognition" }
+
+[[bin]]
+name = "config"
+path = "fuzz_targets/config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "model_json"
+path = "fuzz_targets/model_json.rs"
+test = false
+doc = false
+bench = false

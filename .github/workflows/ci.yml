@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Rust components (including the GTK app) against dlib 19.x, GTK 4.14,
+  # and libadwaita 1.5.
+  ubuntu:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libdlib-dev libblas-dev liblapack-dev \
+            libclang-dev libv4l-dev libpam0g-dev gettext libgtk-4-dev libadwaita-1-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: make lint
+      - run: make test
+      - name: Virtual cameras are refused (vivid, else v4l2loopback)
+        run: |
+          cargo build --locked
+          sudo apt-get install -y "linux-modules-extra-$(uname -r)" || true
+          if ! sudo modprobe vivid n_devs=1 vid_cap_nr=42; then
+            sudo apt-get install -y "linux-headers-$(uname -r)" v4l2loopback-dkms
+            sudo modprobe v4l2loopback video_nr=42
+          fi
+          sudo chmod 0666 /dev/video42
+          tests/virtual-camera.sh 42
+
+  # One minute per parser; failures upload the crashing input.
+  fuzz:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libdlib-dev libblas-dev liblapack-dev libclang-dev
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - name: Fuzz
+        working-directory: fuzz
+        run: |
+          for target in $(cargo fuzz list); do
+            cargo fuzz run "$target" -- -max_total_time=60
+          done
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+
+  # Everything, including the KDE module, against dlib 20.x and KF6.
+  tumbleweed:
+    runs-on: ubuntu-24.04
+    container: opensuse/tumbleweed
+    steps:
+      - name: Install dependencies
+        run: |
+          zypper --non-interactive install git tar gzip make rust cargo gcc-c++ dlib-devel \
+            clang-devel kernel-headers libv4l-devel pam-devel gettext-tools cmake \
+            kf6-extra-cmake-modules kf6-kcmutils-devel kf6-kcoreaddons-devel kf6-ki18n-devel \
+            kf6-kirigami-devel qt6-quick-devel qt6-quickcontrols2-devel qt6-dbus-devel \
+            ShellCheck man gtk4-devel libadwaita-devel desktop-file-utils
+      - uses: actions/checkout@v4
+      - run: make
+      - run: make test
+      - name: Stage install
+        run: make install DESTDIR=$PWD/stage && find stage -type f | sort
+      - name: Lint shell scripts and man pages
+        run: |
+          shellcheck data/faceauth-setup.sh packaging/scripts/*.sh tests/*.sh
+          for page in man/*.[0-9]; do man --warnings -l "$page" > /dev/null; done
+          desktop-file-validate stage/usr/share/applications/*.desktop stage/etc/xdg/autostart/*.desktop

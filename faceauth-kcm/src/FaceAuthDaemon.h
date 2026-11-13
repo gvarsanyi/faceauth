@@ -1,67 +1,53 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 #pragma once
 
-#include <QJsonObject>
-#include <QLocalSocket>
+#include <QDBusConnection>
+#include <QDBusMessage>
 #include <QObject>
-#include <QTimer>
-#include <QVariant>
+#include <QVariantList>
+
 #include <functional>
 
-// One DaemonRequest per daemon round-trip. Self-destructs via deleteLater()
-// after the callback fires. Never reuse; create a fresh one per call.
-class DaemonRequest : public QObject
-{
-    Q_OBJECT
-public:
-    // connectionError is true when the daemon could not be reached at all
-    // (socket missing, connection refused, or timeout before any response).
-    // It is false for protocol-level errors (daemon responded with "Err").
-    using Callback = std::function<void(bool ok, QString error, QVariant data, bool connectionError)>;
-
-    explicit DaemonRequest(QByteArray requestJson,
-                           Callback callback,
-                           int timeoutMs,
-                           QObject *parent = nullptr);
-
-private Q_SLOTS:
-    void onConnected();
-    void onReadyRead();
-    void onError(QLocalSocket::LocalSocketError err);
-    void onTimeout();
-
-private:
-    void finish(bool ok, const QString &error, const QVariant &data, bool connectionError = false);
-
-    QLocalSocket *m_socket;
-    QByteArray    m_requestJson;
-    Callback      m_callback;
-    QByteArray    m_buffer;
-    bool          m_done = false;
-};
-
-// Public-facing factory namespace. All callers use FaceAuthDaemon::send().
+// Thin asynchronous client for the io.github.gvarsanyi.FaceAuth1 D-Bus API.
 namespace FaceAuthDaemon {
 
-constexpr const char *SOCKET_PATH = "/run/faceauth/faceauth.sock";
+inline constexpr const char *BUS_NAME = "io.github.gvarsanyi.FaceAuth1";
+inline constexpr const char *OBJECT_PATH = "/io/github/gvarsanyi/FaceAuth1";
+inline constexpr const char *INTERFACE = "io.github.gvarsanyi.FaceAuth1.Manager";
 
-// Default timeout for quick operations (LoadModel, SetConfig, Clear, Enroll).
-constexpr int QUICK_TIMEOUT_MS = 8000;
+// Timeout for calls that do not open the camera or prompt for a password.
+inline constexpr int QUICK_TIMEOUT_MS = 10000;
+// Timeout for calls that may show a polkit prompt or run the camera.
+inline constexpr int LONG_TIMEOUT_MS = 10 * 60 * 1000;
 
-// Fire a daemon request asynchronously. The callback is invoked on the Qt
-// event loop thread once the daemon replies or the timeout expires.
-//
-// data in callback:
-//   Ok       → {}
-//   Err      → {}  (error string in the error parameter)
-//   Model    → QString (raw model JSON)
-//   Encoding → QVariantList of 128 doubles
-//   Cameras  → QVariantList of QVariantMap {index, name, suitability}
-//
-// The DaemonRequest object is owned by `parent` during its lifetime and
-// deletes itself after the callback returns.
-void send(QJsonObject request,
-          DaemonRequest::Callback callback,
-          int timeoutMs,
-          QObject *parent);
+struct Result {
+    bool ok = false;
+    // True if the daemon could not be reached at all (not installed,
+    // activation failed, bus timeout) rather than returning an error.
+    bool unavailable = false;
+    // D-Bus error name, e.g. io.github.gvarsanyi.FaceAuth1.Error.NoModel.
+    QString errorName;
+    QString errorMessage;
+    QVariantList values;
+
+    // True if errorName is io.github.gvarsanyi.FaceAuth1.Error.<shortName>.
+    bool isError(const char *shortName) const;
+};
+
+using Callback = std::function<void(const Result &)>;
+
+// The system bus, or the session bus when FACEAUTH_BUS=session (for a
+// development daemon started with --session-bus).
+QDBusConnection bus();
+
+// Call a Manager method on bus(). With `interactive`, the call
+// allows polkit to prompt for authentication. The callback runs on the
+// event loop of `context`; it is dropped if `context` is destroyed first.
+void call(const QString &method,
+          const QVariantList &args,
+          QObject *context,
+          Callback callback,
+          int timeoutMs = QUICK_TIMEOUT_MS,
+          bool interactive = false);
 
 } // namespace FaceAuthDaemon

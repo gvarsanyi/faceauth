@@ -1,19 +1,7 @@
-/build-kcm
 /target/
-.cache
-.claude
-CLAUDE.md
-packaging
-
-# Packaging artifacts
+/build-kcm/
 /dist/
-/packaging/staging-kde/
-/packaging/locale/
-
-# dlib pre-trained model files — downloaded automatically by build.rs.
-# Never commit these; they are large binary files (~31 MB combined).
-faceauth-core/models/*.dat
-
-# Generated icon raster files — produced by assets/icons/generate.sh at build time.
-assets/icons/png/
-assets/icons/*.ico
+/packaging/staging/
+.cache/
+.claude/
+CLAUDE.md

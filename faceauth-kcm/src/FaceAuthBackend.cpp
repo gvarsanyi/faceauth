@@ -1,96 +1,93 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 #include "FaceAuthBackend.h"
 #include "FaceAuthDaemon.h"
 
-#include <QJsonArray>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QProcess>
-#include <QFileInfo>
-#include <QGuiApplication>
-
-#include <KAuth/Action>
-#include <KAuth/ActionReply>
-#include <KAuth/ExecuteJob>
-#include <KJob>
+#include <QDBusArgument>
+#include <QDBusServiceWatcher>
+#include <QTimer>
 
 #include <pwd.h>
 #include <unistd.h>
 
-// --- Daemon availability ---
+using FaceAuthDaemon::Result;
 
-void FaceAuthBackend::checkAvailability(bool ok, bool connectionError)
+namespace {
+
+// Seconds the test dialog waits; matches the daemon default and the QML bar.
+constexpr int TEST_TIMEOUT_SECS = 5;
+
+// Sentinel camera index: reuse the camera of the existing model.
+constexpr int ENROLLED_CAMERA = -1;
+
+// Decode ListCameras' a(usy) reply.
+QVariantList decodeCameras(const QVariant &value)
 {
-    const bool wasAvailable = m_daemonAvailable;
-    if (ok) {
-        m_daemonAvailable = true;
-    } else if (connectionError) {
-        m_daemonAvailable = false;
+    QVariantList cameras;
+    const QDBusArgument arg = value.value<QDBusArgument>();
+    arg.beginArray();
+    while (!arg.atEnd()) {
+        uint index = 0;
+        QString name;
+        uchar suitability = 0;
+        arg.beginStructure();
+        arg >> index >> name >> suitability;
+        arg.endStructure();
+        const QString label = name.isEmpty() ? QStringLiteral("/dev/video%1").arg(index)
+                                             : QStringLiteral("/dev/video%1 %2").arg(index).arg(name);
+        cameras.append(QVariantMap{{QStringLiteral("index"), int(index)},
+                                   {QStringLiteral("name"), label},
+                                   {QStringLiteral("suitability"), int(suitability)}});
     }
-    if (m_daemonAvailable == wasAvailable)
-        return;
-    Q_EMIT daemonAvailableChanged();
-    if (m_daemonAvailable) {
-        listCameras();   // reload camera list after down->up recovery
-        refresh();       // reload model state after down->up recovery
-        getServices();   // reload services list after down->up recovery
+    arg.endArray();
+    return cameras;
+}
+
+// Decode GetServices' a(sb) reply.
+QVariantList decodeServices(const QVariant &value)
+{
+    QVariantList services;
+    const QDBusArgument arg = value.value<QDBusArgument>();
+    arg.beginArray();
+    while (!arg.atEnd()) {
+        QString name;
+        bool enabled = false;
+        arg.beginStructure();
+        arg >> name >> enabled;
+        arg.endStructure();
+        services.append(QVariantMap{{QStringLiteral("name"), name}, {QStringLiteral("enabled"), enabled}});
     }
+    arg.endArray();
+    return services;
 }
 
-// --- Camera enumeration ---
-
-void FaceAuthBackend::pingDaemon()
-{
-    // Health-check only: uses ListCameras as a lightweight probe but does not
-    // update m_cameras. Camera data is loaded at startup and on recovery.
-    FaceAuthDaemon::send(
-        QJsonObject{{QLatin1String("op"), QLatin1String("ListCameras")}},
-        [this](bool ok, const QString &, const QVariant &, bool connectionError) {
-            checkAvailability(ok, connectionError);
-        },
-        FaceAuthDaemon::QUICK_TIMEOUT_MS,
-        this);
-}
-
-void FaceAuthBackend::listCameras()
-{
-    FaceAuthDaemon::send(
-        QJsonObject{{QLatin1String("op"), QLatin1String("ListCameras")}},
-        [this](bool ok, const QString &, const QVariant &data, bool connectionError) {
-            checkAvailability(ok, connectionError);
-            if (!ok)
-                return;
-            m_cameras = data.toList();
-            Q_EMIT camerasChanged();
-        },
-        FaceAuthDaemon::QUICK_TIMEOUT_MS,
-        this);
-}
-
-// --- Constructor ---
+} // namespace
 
 FaceAuthBackend::FaceAuthBackend(QObject *parent)
     : QObject(parent)
 {
-    // Resolve the current user once at startup.
-    const uid_t uid = ::getuid();
-    m_uid = static_cast<quint32>(uid);
-    const struct passwd *pw = ::getpwuid(uid);
+    const struct passwd *pw = ::getpwuid(::getuid());
     m_username = pw ? QString::fromLocal8Bit(pw->pw_name) : QString();
 
-    // Health-check the daemon every 2 s. Detects both the daemon going down
-    // mid-session (up->down) and recovery (down->up). Always running.
-    m_pollTimer = new QTimer(this);
-    m_pollTimer->setInterval(2000);
-    m_pollTimer->setSingleShot(false);
-    connect(m_pollTimer, &QTimer::timeout, this, &FaceAuthBackend::pingDaemon);
-    m_pollTimer->start();
+    QDBusConnection bus = FaceAuthDaemon::bus();
+    bus.connect(QLatin1String(FaceAuthDaemon::BUS_NAME),
+                QLatin1String(FaceAuthDaemon::OBJECT_PATH),
+                QLatin1String(FaceAuthDaemon::INTERFACE),
+                QStringLiteral("EnrollProgress"),
+                this,
+                SLOT(onEnrollProgress(uint, uint, QString)));
 
-    listCameras();
+    // The daemon is D-Bus activated, so its name is only owned while it runs.
+    // Reload when it appears (e.g. started by another client after it was
+    // unavailable), and shortly after it goes away (crash, restart).
+    auto *watcher = new QDBusServiceWatcher(QLatin1String(FaceAuthDaemon::BUS_NAME), bus,
+                                            QDBusServiceWatcher::WatchForOwnerChange, this);
+    connect(watcher, &QDBusServiceWatcher::serviceRegistered, this, &FaceAuthBackend::refresh);
+    connect(watcher, &QDBusServiceWatcher::serviceUnregistered, this, &FaceAuthBackend::onDaemonUnregistered);
+
     refresh();
-    getServices();
 }
 
-// --- Private helpers ---
+// --- Helpers ---
 
 void FaceAuthBackend::setBusy(bool b)
 {
@@ -108,358 +105,183 @@ void FaceAuthBackend::setLastError(const QString &err)
     Q_EMIT lastErrorChanged();
 }
 
-void FaceAuthBackend::withAuth(std::function<void()> onGranted)
+void FaceAuthBackend::setEnrolling(bool e)
 {
-    KAuth::Action action(QStringLiteral("org.faceauth.manage"));
-    // The PolkitQt1 backend requires a registered helper; setHelperId wires up
-    // D-Bus activation of faceauth-auth-helper, which shows the polkit dialog.
-    action.setHelperId(QStringLiteral("org.faceauth"));
-    // polkit-1 requires an explicit parent window to display the auth dialog.
-    action.setParentWindow(QGuiApplication::focusWindow());
-    KAuth::ExecuteJob *job = action.execute();
-    connect(job, &KJob::result, this,
-            [this, onGranted = std::move(onGranted)](KJob *j) {
-                if (!j->error()) {
-                    onGranted();
-                } else if (j->error() != KAuth::ActionReply::UserCancelledError) {
-                    setLastError(j->errorString());
-                }
-            });
-    job->start();
+    if (m_enrolling == e)
+        return;
+    m_enrolling = e;
+    Q_EMIT enrollingChanged();
 }
 
-// Resolve a camera ID string ("/dev/videoN" or a by-path/by-id symlink name)
-// to a numeric /dev/videoN index.
-static int resolveCameraId(const QString &id)
+bool FaceAuthBackend::track(const Result &r)
 {
-    if (id.startsWith(QLatin1String("/dev/video"))) {
-        bool ok;
-        const int idx = id.mid(10).toInt(&ok);
-        if (ok)
-            return idx;
+    const bool available = !r.unavailable;
+    if (available != m_daemonAvailable) {
+        m_daemonAvailable = available;
+        Q_EMIT daemonAvailableChanged();
     }
-    // Resolve as a by-path or by-id symlink.
-    for (const char *dir : {"/dev/v4l/by-path/", "/dev/v4l/by-id/"}) {
-        const QFileInfo fi(QString::fromLatin1(dir) + id);
-        const QString target = fi.canonicalFilePath();
-        if (target.startsWith(QLatin1String("/dev/video"))) {
-            bool ok;
-            const int idx = target.mid(10).toInt(&ok);
-            if (ok)
-                return idx;
-        }
-    }
-    return 0;
+    return !r.ok && available;
 }
 
-void FaceAuthBackend::parseModelJson(const QString &rawJson)
+void FaceAuthBackend::reportFailure(const Result &r)
 {
-    const QJsonDocument doc = QJsonDocument::fromJson(rawJson.toUtf8());
-    const QJsonObject root = doc.object();
-
-    m_batchCount = root.value(QLatin1String("encodings")).toArray().size();
-
-    // camera is now a plain string: a by-path ID or "/dev/videoN" fallback.
-    const QString cameraId = root.value(QLatin1String("camera")).toString();
-    m_cameraIndex = resolveCameraId(cameraId);
-
-    Q_EMIT modelChanged();
+    if (!track(r))
+        return;
+    // A dismissed password prompt is not an error worth a banner.
+    if (r.isError("NotAuthorized"))
+        return;
+    setLastError(r.errorMessage);
 }
 
-// --- sendAndRefresh helper ---
-
-void FaceAuthBackend::sendAndRefresh(QJsonObject request)
+void FaceAuthBackend::onDaemonUnregistered()
 {
-    setBusy(true);
-    FaceAuthDaemon::send(
-        std::move(request),
-        [this](bool ok, const QString &err, const QVariant &, bool connectionError) {
-            setBusy(false);
-            checkAvailability(ok, connectionError);
-            if (ok)
-                refresh();
-            else if (!connectionError)
-                setLastError(err);
-        },
-        FaceAuthDaemon::QUICK_TIMEOUT_MS,
-        this);
+    QTimer::singleShot(1000, this, &FaceAuthBackend::refresh);
 }
 
-// --- Public slots ---
+// --- Loading state ---
 
 void FaceAuthBackend::refresh()
 {
-    if (m_username.isEmpty())
-        return;
-
-    setBusy(true);
-    FaceAuthDaemon::send(
-        QJsonObject{{QLatin1String("op"), QLatin1String("LoadModel")},
-                    {QLatin1String("username"), m_username}},
-        [this](bool ok, const QString &err, const QVariant &data, bool connectionError) {
-            setBusy(false);
-            checkAvailability(ok, connectionError);
-            if (ok) {
-                parseModelJson(data.toString());
-            } else {
-                // Connection errors are shown via the daemon-unavailable banner;
-                // "no model enrolled" is not an error either.
-                if (!connectionError && !err.contains(QLatin1String("no model enrolled"))) {
-                    setLastError(err);
-                }
-                // Reset to unenrolled state.
-                m_batchCount = 0;
-                Q_EMIT modelChanged();
-            }
-        },
-        FaceAuthDaemon::QUICK_TIMEOUT_MS,
-        this);
+    loadCameras();
+    loadModel();
+    loadServices();
 }
 
-void FaceAuthBackend::setServiceOpt(const QString &service, bool allowed)
+void FaceAuthBackend::loadCameras()
 {
-    if (service.trimmed().isEmpty())
-        return;
-    const QString trimmed = service.trimmed();
-    withAuth([this, trimmed, allowed]() {
-        setBusy(true);
-        FaceAuthDaemon::send(
-            QJsonObject{{QLatin1String("op"),      QLatin1String("SetOpt")},
-                        {QLatin1String("username"), m_username},
-                        {QLatin1String("service"),  trimmed},
-                        {QLatin1String("allowed"),  allowed}},
-            [this](bool ok, const QString &err, const QVariant &, bool connectionError) {
-                setBusy(false);
-                checkAvailability(ok, connectionError);
-                if (ok)
-                    getServices();
-                else if (!connectionError)
-                    setLastError(err);
-            },
-            FaceAuthDaemon::QUICK_TIMEOUT_MS,
-            this);
+    FaceAuthDaemon::call(QStringLiteral("ListCameras"), {}, this, [this](const Result &r) {
+        if (track(r) || !r.ok)
+            return;
+        m_cameras = decodeCameras(r.values.value(0));
+        Q_EMIT camerasChanged();
     });
 }
 
-void FaceAuthBackend::getServices()
+void FaceAuthBackend::loadModel()
 {
     if (m_username.isEmpty())
         return;
+    FaceAuthDaemon::call(QStringLiteral("GetModel"), {m_username}, this, [this](const Result &r) {
+        const bool daemonError = track(r);
+        if (r.ok) {
+            m_cameraIndex = r.values.value(1).toInt();
+            m_batchCount = int(r.values.value(2).toUInt());
+        } else {
+            m_cameraIndex = -1;
+            m_batchCount = 0;
+            if (daemonError && !r.isError("NoModel"))
+                setLastError(r.errorMessage);
+        }
+        Q_EMIT modelChanged();
+    });
+}
 
-    FaceAuthDaemon::send(
-        QJsonObject{{QLatin1String("op"),      QLatin1String("GetServices")},
-                    {QLatin1String("username"), m_username}},
-        [this](bool ok, const QString &, const QVariant &data, bool connectionError) {
-            checkAvailability(ok, connectionError);
-            if (!ok)
-                return;
-            m_servicesList = data.toList();
-            Q_EMIT servicesChanged();
+void FaceAuthBackend::loadServices()
+{
+    if (m_username.isEmpty())
+        return;
+    FaceAuthDaemon::call(QStringLiteral("GetServices"), {m_username}, this, [this](const Result &r) {
+        if (track(r) || !r.ok)
+            return;
+        m_servicesList = decodeServices(r.values.value(0));
+        Q_EMIT servicesChanged();
+    });
+}
+
+// --- Actions ---
+
+void FaceAuthBackend::setServiceEnabled(const QString &service, bool enabled)
+{
+    setBusy(true);
+    FaceAuthDaemon::call(
+        QStringLiteral("SetServiceEnabled"), {m_username, service, enabled}, this,
+        [this](const Result &r) {
+            setBusy(false);
+            reportFailure(r);
+            // Reload either way so the checkbox reflects the stored state.
+            loadServices();
         },
-        FaceAuthDaemon::QUICK_TIMEOUT_MS,
-        this);
+        FaceAuthDaemon::LONG_TIMEOUT_MS, true);
 }
 
 void FaceAuthBackend::clearAll()
 {
-    withAuth([this]() {
-        // index: null removes the entire model.
-        sendAndRefresh(QJsonObject{{QLatin1String("op"), QLatin1String("Clear")},
-                                   {QLatin1String("username"), m_username},
-                                   {QLatin1String("index"), QJsonValue::Null}});
-    });
-}
-
-// --- Desktop notification helpers ---
-
-static QString notifyBin()
-{
-    return QStringLiteral(FACEAUTH_LIBEXEC_DIR "/faceauth-notify");
-}
-
-// Spawn `faceauth-notify start <uid> faceauth` asynchronously. The notification
-// ID is stored in m_notifId when the helper exits; the daemon call runs in
-// parallel. Since the helper only makes a single D-Bus call, it reliably
-// finishes well before the 10-second authenticate timeout.
-void FaceAuthBackend::notifyStart()
-{
-    m_notifId = 0;
-    auto *proc = new QProcess(this);
-    connect(proc, &QProcess::finished, this,
-            [this, proc](int exitCode, QProcess::ExitStatus) {
-                if (exitCode == 0) {
-                    bool ok;
-                    quint32 id = proc->readAllStandardOutput().trimmed().toUInt(&ok);
-                    if (ok)
-                        m_notifId = id;
-                }
-                proc->deleteLater();
-            });
-    proc->start(notifyBin(), {QStringLiteral("start"),
-                               QString::number(m_uid),
-                               QStringLiteral("faceauth")});
-}
-
-// Spawn `faceauth-notify success|failure <uid> <notifId> faceauth` to replace
-// the in-progress notification with the final result. Fire-and-forget.
-void FaceAuthBackend::notifyFinish(quint32 notifId, bool success)
-{
-    if (notifId == 0)
-        return;
-    const QString sub = success ? QStringLiteral("success") : QStringLiteral("failure");
-    QProcess::startDetached(notifyBin(), {sub,
-                                          QString::number(m_uid),
-                                          QString::number(notifId),
-                                          QStringLiteral("faceauth")});
-}
-
-// --- Test authentication ---
-
-void FaceAuthBackend::testAuth()
-{
-    if (m_testing || m_busy)
-        return;
-
-    static constexpr int TEST_TIMEOUT_SECS = 5; // matches CLI default and PAM module
-
-    m_testing = true;
-    Q_EMIT testingChanged();
     setBusy(true);
-
-    // Fire the "authenticating..." desktop notification asynchronously.
-    // The daemon call runs in parallel; m_notifId is populated by the time
-    // the authenticate response arrives (the helper is far faster than 5 s).
-    notifyStart();
-
-    FaceAuthDaemon::send(
-        QJsonObject{{QLatin1String("op"),           QLatin1String("Authenticate")},
-                    {QLatin1String("username"),     m_username},
-                    {QLatin1String("timeout_secs"), TEST_TIMEOUT_SECS}},
-        [this](bool ok, const QString &err, const QVariant &, bool connectionError) {
+    FaceAuthDaemon::call(
+        QStringLiteral("DeleteModel"), {m_username}, this,
+        [this](const Result &r) {
             setBusy(false);
-            checkAvailability(ok, connectionError);
-            m_testing = false;
-            Q_EMIT testingChanged();
-            notifyFinish(m_notifId, ok);
-            m_notifId = 0;
-            if (ok) {
-                Q_EMIT authSucceeded();
-            } else {
-                // Always emit so QML can reset testMode.
-                // Connection errors are shown via the daemon-unavailable banner.
-                Q_EMIT authFailed(connectionError ? QString() : err);
-            }
+            reportFailure(r);
+            loadModel();
         },
-        (TEST_TIMEOUT_SECS + 10) * 1000,
-        this);
+        FaceAuthDaemon::LONG_TIMEOUT_MS, true);
 }
-
-// --- Enrollment state machine ---
 
 void FaceAuthBackend::startEnrollment(int cameraIndex)
 {
     if (m_enrolling || m_busy)
         return;
+    setLastError(QString());
+    m_capturesDone = 0;
+    Q_EMIT capturesDoneChanged();
+    setEnrolling(true);
+    setBusy(true);
 
-    withAuth([this, cameraIndex]() {
-        m_cameraIndex = cameraIndex;
-        m_capturesDone = 0;
-        m_capturedEncodings.clear();
-        m_enrolling = true;
-        Q_EMIT enrollingChanged();
-        Q_EMIT capturesDoneChanged();
-        captureOne();
-    });
+    const int index = enrolled() ? ENROLLED_CAMERA : cameraIndex;
+    FaceAuthDaemon::call(
+        QStringLiteral("Enroll"), {m_username, index}, this,
+        [this](const Result &r) {
+            setBusy(false);
+            // Report the outcome before enrolling turns false: the dialog
+            // closes itself on a false enrolling without success or error.
+            if (r.ok) {
+                loadModel();
+                Q_EMIT enrollmentSucceeded();
+            } else if (!r.isError("Cancelled")) {
+                reportFailure(r);
+            }
+            setEnrolling(false);
+        },
+        FaceAuthDaemon::LONG_TIMEOUT_MS, true);
+}
+
+void FaceAuthBackend::onEnrollProgress(uint done, uint total, const QString &)
+{
+    if (!m_enrolling)
+        return;
+    m_capturesDone = int(done);
+    m_capturesTotal = int(total);
+    Q_EMIT capturesDoneChanged();
 }
 
 void FaceAuthBackend::cancelEnrollment()
 {
     if (!m_enrolling)
         return;
-    m_enrolling = false;
-    m_capturesDone = 0;
-    m_capturedEncodings.clear();
-    setBusy(false);
-    Q_EMIT enrollingChanged();
-    Q_EMIT capturesDoneChanged();
+    FaceAuthDaemon::call(QStringLiteral("CancelEnroll"), {}, this, [this](const Result &r) { track(r); });
 }
 
-void FaceAuthBackend::captureOne()
+void FaceAuthBackend::testAuth()
 {
+    if (m_testing || m_busy)
+        return;
+    m_testing = true;
+    Q_EMIT testingChanged();
     setBusy(true);
-    // Per-capture timeout: 30 s for the camera + 10 s headroom in the socket layer.
-    const int timeoutMs = (CAPTURE_TIMEOUT_SECS + 10) * 1000;
 
-    FaceAuthDaemon::send(
-        QJsonObject{{QLatin1String("op"), QLatin1String("CaptureEncoding")},
-                    {QLatin1String("camera_index"), m_cameraIndex},
-                    {QLatin1String("timeout_secs"), CAPTURE_TIMEOUT_SECS}},
-        [this](bool ok, const QString &err, const QVariant &data, bool connectionError) {
+    FaceAuthDaemon::call(
+        QStringLiteral("Authenticate"), {m_username, QString(), uint(TEST_TIMEOUT_SECS)}, this,
+        [this](const Result &r) {
             setBusy(false);
-            checkAvailability(ok, connectionError);
-            if (!m_enrolling)
-                return; // cancelled while waiting
-
-            if (!ok) {
-                if (!connectionError)
-                    setLastError(err);
-                Q_EMIT operationFailed(err);
-                cancelEnrollment();
-                return;
-            }
-
-            m_capturedEncodings.append(data.toList());
-            ++m_capturesDone;
-            Q_EMIT capturesDoneChanged();
-
-            if (m_capturesDone < CAPTURES_REQUIRED) {
-                captureOne(); // next capture
-            } else {
-                submitEnrollment();
-            }
+            track(r);
+            m_testing = false;
+            Q_EMIT testingChanged();
+            if (r.ok)
+                Q_EMIT authSucceeded();
+            else
+                Q_EMIT authFailed(r.unavailable ? QString() : r.errorMessage);
         },
-        timeoutMs,
-        this);
-}
-
-void FaceAuthBackend::submitEnrollment()
-{
-    // Build the encodings array: each capture is an array of 128 floats.
-    QJsonArray encodingsArray;
-    for (const QVariantList &capture : std::as_const(m_capturedEncodings)) {
-        QJsonArray captureArray;
-        for (const QVariant &v : capture)
-            captureArray.append(v.toDouble());
-        encodingsArray.append(captureArray);
-    }
-
-    setBusy(true);
-    // Enroll can take a moment (disk write); use the quick timeout.
-    FaceAuthDaemon::send(
-        QJsonObject{{QLatin1String("op"), QLatin1String("Enroll")},
-                    {QLatin1String("username"), m_username},
-                    {QLatin1String("camera_index"), m_cameraIndex},
-                    {QLatin1String("encodings"), encodingsArray}},
-        [this](bool ok, const QString &err, const QVariant &, bool connectionError) {
-            setBusy(false);
-            checkAvailability(ok, connectionError);
-            m_enrolling = false;
-            m_capturesDone = 0;
-            m_capturedEncodings.clear();
-            Q_EMIT enrollingChanged();
-            Q_EMIT capturesDoneChanged();
-
-            if (ok) {
-                refresh();
-                Q_EMIT enrollmentSucceeded();
-            } else {
-                if (!connectionError)
-                    setLastError(err);
-                Q_EMIT operationFailed(err);
-            }
-        },
-        FaceAuthDaemon::QUICK_TIMEOUT_MS,
-        this);
+        (TEST_TIMEOUT_SECS + 30) * 1000);
 }
 
 void FaceAuthBackend::clearLastError()

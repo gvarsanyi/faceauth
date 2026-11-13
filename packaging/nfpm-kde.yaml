@@ -1,0 +1,31 @@
+# nfpm definition for the faceauth-kde package (System Settings module and
+# standalone GUI), built from "cmake --install" staged into
+# packaging/staging/kde.
+name: faceauth-kde
+version: ${FACEAUTH_VERSION}
+arch: ${NFPM_ARCH}
+platform: linux
+maintainer: Greg Varsanyi <gvarsanyi@gmail.com>
+description: |-
+  KDE Plasma integration for faceauth
+  System Settings module and standalone application for enrolling faces and
+  choosing which services use face authentication.
+homepage: https://github.com/gvarsanyi/faceauth
+license: MIT OR Apache-2.0
+
+overrides:
+  deb:
+    depends:
+      - faceauth (= ${FACEAUTH_VERSION})
+      - libkf6kcmutils6
+      - qml6-module-org-kde-kirigami
+  rpm:
+    depends:
+      - faceauth = ${FACEAUTH_VERSION}
+      - kf6-kcmutils
+      - kf6-kirigami
+
+contents:
+  - src: packaging/staging/kde/usr
+    dst: /usr
+    type: tree

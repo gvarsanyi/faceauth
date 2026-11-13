@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=faceauth notification agent
+Comment=Shows a notification while face authentication uses the camera
+Exec=@LIBEXECDIR@/faceauth-agent
+Icon=faceauth
+NoDisplay=true
+Terminal=false
+X-GNOME-Autostart-enabled=true
+X-KDE-autostart-phase=1

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 #pragma once
 
 #include <KQuickConfigModule>
@@ -9,7 +10,7 @@ class FaceAuthKcm : public KQuickConfigModule
 
     // Expose the backend to QML as kcm.backend.
     // KQuickConfigModule automatically injects 'kcm' as a context property,
-    // so QML can access kcm.backend.enrolled, kcm.backend.setDisabled(), etc.
+    // so QML can access kcm.backend.enrolled, kcm.backend.setServiceEnabled(), etc.
     Q_PROPERTY(FaceAuthBackend *backend READ backend CONSTANT)
 
 public:

@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
-// SPDX-FileCopyrightText: faceauth contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: Greg Varsanyi
 
 pragma ComponentBehavior: Bound
 
@@ -20,15 +20,12 @@ KCMUtils.SimpleKCM {
     // In KCM mode this is kcm.backend, injected by KQuickConfigModule.
     property var backend: typeof kcm !== "undefined" ? kcm.backend : null
 
+    // The enrolled camera is connected (or nothing is enrolled yet).
+    readonly property bool cameraReady: root.backend.enrolled ? root.backend.cameraIndex >= 0 : root.backend.cameras.length > 0
+
     title: i18n("Face Authentication")
 
-    // --- Enrollment state ---
-
-    // True while the inline enrollment section is visible.
-    property bool enrollmentMode: false
-
     // --- Test state ---
-    property bool testMode: false      // true while test UI is visible
     property bool testSuccess: false
     property string testError: ""
     readonly property real testTimeoutSecs: 5
@@ -54,21 +51,15 @@ KCMUtils.SimpleKCM {
     }
 
     Connections {
-        target: backend
+        target: root.backend
         function onEnrollingChanged() {
-            if (root.backend.enrolling)
-                enrollmentSheet.capturingFinished = false;
+            // Neither success nor error: cancelled, or the password prompt
+            // was dismissed. Nothing more to show.
+            if (!root.backend.enrolling && !enrollmentSheet.capturingFinished && root.backend.lastError.length === 0)
+                enrollmentSheet.close();
         }
         function onEnrollmentSucceeded() {
             enrollmentSheet.capturingFinished = true;
-        }
-        function onOperationFailed(message) {
-            enrollmentSheet.capturingFinished = false;
-        }
-        function onCapturesDoneChanged() {
-            if (root.backend.capturesTotal > 0 && root.backend.capturesDone >= root.backend.capturesTotal) {
-                enrollmentSheet.capturingFinished = true;
-            }
         }
         function onAuthSucceeded() {
             root.testSuccess = true;
@@ -95,21 +86,33 @@ KCMUtils.SimpleKCM {
             type: Kirigami.MessageType.Error
             visible: !root.backend.daemonAvailable
             showCloseButton: false
-            text: i18n("Face authentication service (faceauth-daemon.service) is not available")
+            text: i18n("The face authentication service (faceauth-daemon) is not available")
+            actions: [
+                Kirigami.Action {
+                    text: i18n("Retry")
+                    icon.name: "view-refresh"
+                    onTriggered: root.backend.refresh()
+                }
+            ]
         }
 
+        // Closing clears the error; visibility follows lastError, so the
+        // binding is never overwritten.
         Kirigami.InlineMessage {
-            id: errorBanner
             Layout.fillWidth: true
             type: Kirigami.MessageType.Error
             visible: root.backend.lastError.length > 0
             text: root.backend.lastError
-            showCloseButton: true
-            onVisibleChanged: if (!visible)
-                root.backend.clearLastError()
+            showCloseButton: false
+            actions: [
+                Kirigami.Action {
+                    icon.name: "dialog-close"
+                    displayHint: Kirigami.DisplayHint.IconOnly
+                    text: i18n("Close")
+                    onTriggered: root.backend.clearLastError()
+                }
+            ]
         }
-
-        // Test authentication feedback is shown in the overlay.
 
         Kirigami.FormLayout {
             visible: root.backend.daemonAvailable
@@ -121,28 +124,25 @@ KCMUtils.SimpleKCM {
                 Kirigami.FormData.label: i18n("Status")
             }
 
-            RowLayout {
+            Controls.Label {
                 Kirigami.FormData.label: i18n("Service:")
-                spacing: Kirigami.Units.smallSpacing
-
-                Controls.Label {
-                    text: root.backend.enrolled ? i18n("Available") : i18n("Available, no face model data")
-                    color: root.backend.enrolled ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.neutralTextColor
-                }
+                text: root.backend.enrolled ? i18n("Available") : i18n("Available, no face model data")
+                color: root.backend.enrolled ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.neutralTextColor
             }
 
-            // Test button  -  visible when enrolled and idle.
-            RowLayout {
-                spacing: Kirigami.Units.smallSpacing
-
-                Controls.Button {
-                    text: i18n("Test Face Authentication")
-                    icon.name: "webcam"
-                    enabled: root.backend.enrolled && !root.enrollmentMode && !root.testMode
-                    onClicked: {
-                        testSheet.open();
-                        root.backend.testAuth();
-                    }
+            Controls.Button {
+                text: i18n("Test Face Authentication")
+                icon.name: "webcam"
+                enabled: root.backend.enrolled && root.cameraReady
+                onClicked: {
+                    // Reset before the call: a quick failure may arrive
+                    // before the dialog's open animation ends.
+                    root.testSuccess = false;
+                    root.testError = "";
+                    root.testElapsedSecs = 0;
+                    testProgressTimer.start();
+                    testSheet.open();
+                    root.backend.testAuth();
                 }
             }
 
@@ -153,14 +153,12 @@ KCMUtils.SimpleKCM {
                 Kirigami.FormData.label: i18n("Enrollment")
             }
 
-            // Camera row  -  selector or info label, plus enroll button when idle.
-            // Hidden entirely when the daemon is unavailable (no cameras to show).
+            // Camera: a selector before the first enrollment, then the
+            // enrolled camera (more batches always use it).
             RowLayout {
                 Kirigami.FormData.label: i18n("Camera:")
                 spacing: Kirigami.Units.smallSpacing
 
-                // Selector  -  when no model yet, or during enrollment (disabled,
-                // pre-selected to the model's camera for re-enrollment).
                 Controls.ComboBox {
                     id: cameraCombo
                     Layout.fillWidth: true
@@ -168,35 +166,27 @@ KCMUtils.SimpleKCM {
                     textRole: "name"
                     valueRole: "index"
                     visible: !root.backend.enrolled
-                    // Only enabled for fresh enrollment before capturing starts;
-                    // re-enrollment reuses the existing camera.
-                    enabled: !root.backend.enrolled && !root.backend.enrolling
+                    // Default to the most suitable (IR) camera; ties go to the
+                    // lowest index since the list is index-sorted.
                     currentIndex: {
-                        // Fresh enrollment: default to the highest-suitability camera
-                        // (IR cameras are best for face auth). Ties go to the first
-                        // (lowest-index) camera since the list is index-sorted.
                         var best = 0;
                         for (var i = 1; i < root.backend.cameras.length; i++) {
-                            if ((root.backend.cameras[i].suitability || 0) > (root.backend.cameras[best].suitability || 0))
+                            if (root.backend.cameras[i].suitability > root.backend.cameras[best].suitability)
                                 best = i;
                         }
                         return best;
                     }
                 }
 
-                // Info label  -  shown when enrolled and not in enrollment mode.
-                // Uses the same display name as the dropdown (path + device name);
-                // falls back to cameraInfo if the cameras list isn't populated yet.
-                Controls.Button {
+                Controls.Label {
+                    visible: root.backend.enrolled
                     text: {
                         for (var i = 0; i < root.backend.cameras.length; i++) {
                             if (root.backend.cameras[i].index === root.backend.cameraIndex)
                                 return root.backend.cameras[i].name;
                         }
-                        return "/dev/video" + root.backend.cameraIndex;
+                        return root.backend.cameraIndex >= 0 ? "/dev/video" + root.backend.cameraIndex : i18n("Enrolled camera not connected");
                     }
-                    enabled: false
-                    visible: root.backend.enrolled
                 }
             }
 
@@ -207,10 +197,10 @@ KCMUtils.SimpleKCM {
                 Controls.Button {
                     text: root.backend.enrolled ? i18n("Add More") : i18n("Add")
                     icon.name: "list-add-user"
-                    enabled: root.backend.cameras.length > 0
+                    enabled: root.cameraReady
                     onClicked: {
-                        var idx = root.backend.enrolled ? root.backend.cameraIndex : ((cameraCombo.currentValue !== undefined) ? cameraCombo.currentValue : 0);
-                        root.backend.startEnrollment(idx);
+                        // When enrolled, the backend reuses the model's camera.
+                        root.backend.startEnrollment(cameraCombo.currentValue);
                         enrollmentSheet.open();
                     }
                 }
@@ -218,13 +208,10 @@ KCMUtils.SimpleKCM {
                 Controls.Button {
                     text: i18n("Delete All")
                     icon.name: "edit-delete"
-                    enabled: root.backend.enrolled
-                    visible: root.backend.enrolled && !root.enrollmentMode
+                    visible: root.backend.enrolled
                     onClicked: clearConfirmDialog.open()
                 }
             }
-
-            // Enrollment workflow is shown in the enrollmentSheet dialog.
 
             // --- Services ---
             Kirigami.Separator {
@@ -234,26 +221,34 @@ KCMUtils.SimpleKCM {
             }
 
             Controls.Label {
-                Kirigami.FormData.label: i18n("Always ignored:")
-                text: i18n("Non-interactive (background) processes")
+                Kirigami.FormData.label: i18n("Never used for:")
+                text: i18n("Remote sessions (SSH, remote desktop), including sudo inside them")
                 enabled: false
             }
 
             Controls.Label {
-                text: i18n("SSH sessions (including sudo within SSH)")
+                text: i18n("Background processes and sessions that are not in the foreground")
                 enabled: false
             }
 
             ColumnLayout {
-                Kirigami.FormData.label: i18n("Allowed:")
+                Kirigami.FormData.label: i18n("Use for:")
                 Kirigami.FormData.labelAlignment: Qt.AlignTop
                 Layout.fillWidth: true
                 spacing: Kirigami.Units.smallSpacing
 
                 Controls.Label {
-                    text: i18n("(no services recorded yet)")
+                    text: i18n("(no services enabled by the administrator)")
                     visible: root.backend.servicesList.length === 0
                     enabled: false
+                }
+
+                Controls.Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    text: i18n("The administrator chooses the available services in /etc/faceauth/faceauth.conf.")
+                    enabled: false
+                    font: Kirigami.Theme.smallFont
                 }
 
                 Repeater {
@@ -261,8 +256,8 @@ KCMUtils.SimpleKCM {
                     delegate: Controls.CheckBox {
                         required property var modelData
                         text: modelData.name
-                        checked: modelData.allowed
-                        onToggled: root.backend.setServiceOpt(modelData.name, checked)
+                        checked: modelData.enabled
+                        onToggled: root.backend.setServiceEnabled(modelData.name, checked)
                     }
                 }
             }
@@ -280,21 +275,8 @@ KCMUtils.SimpleKCM {
         title: i18n("Test Face Authentication")
         standardButtons: Kirigami.Dialog.NoButton
         padding: Kirigami.Units.largeSpacing
-
-        onOpened: {
-            root.testMode = true;
-            root.testSuccess = false;
-            root.testError = "";
-            root.testElapsedSecs = 0;
-            testProgressTimer.start();
-        }
-        onClosed: {
-            root.testMode = false;
-            root.testSuccess = false;
-            root.testError = "";
-            testProgressTimer.stop();
-            root.testElapsedSecs = 0;
-        }
+        // The daemon check cannot be cancelled; wait for its result.
+        closePolicy: root.backend.testing ? Controls.Popup.NoAutoClose : Controls.Popup.CloseOnEscape
 
         ColumnLayout {
             spacing: Kirigami.Units.mediumSpacing
@@ -318,17 +300,15 @@ KCMUtils.SimpleKCM {
                 Layout.fillWidth: true
                 from: 0
                 to: root.testTimeoutSecs
-                value: root.backend.testing ? root.testElapsedSecs : (root.testSuccess || root.testError.length > 0 ? root.testTimeoutSecs : 0)
+                value: root.testElapsedSecs
             }
 
-            RowLayout {
+            Controls.Button {
                 Layout.alignment: Qt.AlignRight
-
-                Controls.Button {
-                    text: root.backend.testing ? i18n("Cancel") : i18n("Close")
-                    icon.name: "dialog-ok"
-                    onClicked: testSheet.close()
-                }
+                text: i18n("Close")
+                icon.name: "dialog-close"
+                enabled: !root.backend.testing
+                onClicked: testSheet.close()
             }
         }
     }
@@ -342,15 +322,10 @@ KCMUtils.SimpleKCM {
 
         property bool capturingFinished: false
 
-        onOpened: {
-            root.enrollmentMode = true;
-            capturingFinished = false;
-        }
-
+        onOpened: capturingFinished = false
         onClosed: {
             if (root.backend.enrolling)
                 root.backend.cancelEnrollment();
-            root.enrollmentMode = false;
         }
 
         ColumnLayout {
@@ -383,15 +358,11 @@ KCMUtils.SimpleKCM {
                 value: enrollmentSheet.capturingFinished ? root.backend.capturesTotal : root.backend.capturesDone
             }
 
-            RowLayout {
+            Controls.Button {
                 Layout.alignment: Qt.AlignRight
-                spacing: Kirigami.Units.smallSpacing
-
-                Controls.Button {
-                    text: root.backend.enrolling ? i18n("Cancel") : i18n("Close")
-                    icon.name: root.backend.enrolling ? "dialog-cancel" : "dialog-ok"
-                    onClicked: enrollmentSheet.close()
-                }
+                text: root.backend.enrolling ? i18n("Cancel") : i18n("Close")
+                icon.name: root.backend.enrolling ? "dialog-cancel" : "dialog-close"
+                onClicked: enrollmentSheet.close()
             }
         }
     }

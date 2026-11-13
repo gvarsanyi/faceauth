@@ -2,18 +2,22 @@
 name = "faceauth-core"
 version.workspace = true
 edition.workspace = true
-build = "build.rs"
+license.workspace = true
+rust-version.workspace = true
+description = "Face detection, matching, and model storage for faceauth"
 
 [build-dependencies]
 bzip2 = "0.4"
-
-[dev-dependencies]
-tempfile = "3"
+sha2 = "0.10"
 
 [dependencies]
+faceauth-common = { workspace = true }
 dlib-face-recognition = { workspace = true }
 nokhwa = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-libc = "0.2"
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

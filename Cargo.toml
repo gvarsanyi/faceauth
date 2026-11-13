@@ -1,21 +1,51 @@
 [workspace]
 resolver = "2"
-members = ["faceauth-core", "faceauth-cli", "faceauth-pam", "faceauth-daemon", "faceauth-notify"]
+members = [
+    "faceauth-common",
+    "faceauth-core",
+    "faceauth-cli",
+    "faceauth-pam",
+    "faceauth-daemon",
+    "faceauth-agent",
+    "faceauth-gtk",
+]
+# faceauth-gtk needs GTK 4 and libadwaita headers and is built explicitly:
+# make builds it when they are installed (GTK=0/1 overrides).
+default-members = [
+    "faceauth-common",
+    "faceauth-core",
+    "faceauth-cli",
+    "faceauth-pam",
+    "faceauth-daemon",
+    "faceauth-agent",
+]
 
 [patch.crates-io]
 # Patched to fix GREY vs GRAY fourcc mismatch for V4L2 greyscale cameras.
 # The kernel uses "GREY" but nokhwa hardcoded "GRAY".
 nokhwa-bindings-linux = { path = "vendor/nokhwa-bindings-linux" }
+# Patched for dlib 20 (landmark parts became dpoint); see vendor/README.md.
+dlib-face-recognition = { path = "vendor/dlib-face-recognition" }
 
 [workspace.package]
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+# Required by the locked dependencies (zbus 5.14, home 0.5.12).
+rust-version = "1.88"
+repository = "https://github.com/gvarsanyi/faceauth"
 
 [workspace.dependencies]
+faceauth-common = { path = "faceauth-common" }
+faceauth-core = { path = "faceauth-core" }
 dlib-face-recognition = "0.3.2"
 nokhwa = { version = "0.10.10", features = ["input-native"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
-gettext-rs = "0.7.7"
+# Use the C library's gettext (glibc) instead of building a bundled copy.
+gettext-rs = { version = "0.7.7", features = ["gettext-system"] }
 thiserror = "2"
+libc = "0.2"
+zbus = "5"
+tempfile = "3"

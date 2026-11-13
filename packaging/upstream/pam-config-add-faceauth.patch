@@ -1,0 +1,180 @@
+Add pam_faceauth.so module (draft for https://github.com/SUSE/pam-config)
+
+pam_faceauth (https://github.com/gvarsanyi/faceauth) provides face
+authentication. It goes into the auth stack as "sufficient" before
+pam_unix; every non-success result is PAM_AUTHINFO_UNAVAIL, so the stack
+falls through to the password. Supports the module's timeout= option.
+
+Based on pam-config 7ab3c20 (2026-02-16). Not compiled yet.
+---
+diff --git a/src/Makefile.am b/src/Makefile.am
+index 0589a92..863b6c2 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -32,7 +32,7 @@ pam_config_SOURCES = pam-config.c load_config.c write_config.c \
+ 	mod_pam_group.c mod_pam_time.c mod_pam_ssh.c mod_pam_succeed_if.c \
+ 	mod_pam_csync.c mod_pam_fp.c mod_pam_fprint.c mod_pam_pwhistory.c \
+ 	mod_pam_selinux.c mod_pam_gnome_keyring.c mod_pam_passwdqc.c \
+-	mod_pam_exec.c mod_pam_sss.c mod_pam_fprintd.c mod_pam_systemd.c \
++	mod_pam_exec.c mod_pam_sss.c mod_pam_fprintd.c mod_pam_faceauth.c mod_pam_systemd.c \
+ 	mod_pam_systemd_home.c \
+ 	mod_pam_ecryptfs.c mod_pam_access.c mod_pam_google_authenticator.c \
+ 	mod_pam_kwallet5.c mod_pam_keyinit.c mod_pam_mktemp.c \
+diff --git a/src/module_priorities.h b/src/module_priorities.h
+index 7028171..c41be78 100644
+--- a/src/module_priorities.h
++++ b/src/module_priorities.h
+@@ -28,6 +28,7 @@
+ #define PAM_FP_AUTH_PRIORITY 400
+ #define PAM_FPRINT_AUTH_PRIORITY 500
+ #define PAM_FPRINTD_AUTH_PRIORITY 600
++#define PAM_FACEAUTH_AUTH_PRIORITY 650
+ #define PAM_THINKFINGER_AUTH_PRIORITY 700
+ #define PAM_HIMMELBLAU_AUTH_PRIORITY 800
+ #define PAM_GNOME_KEYRING_AUTH_PRIORITY 900
+diff --git a/src/pam-config.8.xml b/src/pam-config.8.xml
+index e359401..b5c9753 100644
+--- a/src/pam-config.8.xml
++++ b/src/pam-config.8.xml
+@@ -601,6 +601,22 @@
+               </para>
+             </listitem>
+           </varlistentry>
++          <varlistentry>
++            <term><option>--faceauth</option></term>
++            <listitem>
++              <para>
++                Enable/Disable pam_faceauth.so
++              </para>
++            </listitem>
++          </varlistentry>
++          <varlistentry>
++            <term><option>--faceauth-timeout</option>=<replaceable>value</replaceable></term>
++            <listitem>
++              <para>
++                Add <option>timeout=<replaceable>value</replaceable></option> option to all pam_faceauth.so invocations.
++              </para>
++            </listitem>
++          </varlistentry>
+           <varlistentry>
+             <term><option>--fscrypt</option></term>
+             <listitem>
+diff --git a/src/supported-modules.h b/src/supported-modules.h
+index 4060e94..4aefd9c 100644
+--- a/src/supported-modules.h
++++ b/src/supported-modules.h
+@@ -8,6 +8,7 @@ extern pam_module_t mod_pam_deny;
+ extern pam_module_t mod_pam_ecryptfs;
+ extern pam_module_t mod_pam_env;
+ extern pam_module_t mod_pam_exec;
++extern pam_module_t mod_pam_faceauth;
+ extern pam_module_t mod_pam_faildelay;
+ extern pam_module_t mod_pam_fp;
+ extern pam_module_t mod_pam_fprint;
+@@ -67,6 +68,7 @@ pam_module_t *common_builtin_modules[] = {
+   &mod_pam_ecryptfs,
+   &mod_pam_env,
+   &mod_pam_exec,
++  &mod_pam_faceauth,
+   &mod_pam_faildelay,
+   &mod_pam_fp,
+   &mod_pam_fprint,
+@@ -292,6 +294,7 @@ static pam_module_t *auth_modules[] = {
+   &mod_pam_fp,
+   &mod_pam_fprint,
+   &mod_pam_fprintd,
++  &mod_pam_faceauth,
+   &mod_pam_thinkfinger,
+   &mod_pam_himmelblau,
+   &mod_pam_gnome_keyring,
+diff --git a/src/mod_pam_faceauth.c b/src/mod_pam_faceauth.c
+new file mode 100644
+index 0000000..0f92b01
+--- /dev/null
++++ b/src/mod_pam_faceauth.c
+@@ -0,0 +1,85 @@
++/* Copyright (C) 2026 Greg Varsanyi
++
++   This program is free software; you can redistribute it and/or modify
++   it under the terms of the GNU General Public License version 2 as
++   published by the Free Software Foundation.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program; if not, write to the Free Software Foundation,
++   Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.  */
++
++/* pam_faceauth.so (https://github.com/gvarsanyi/faceauth): face
++   authentication. Every non-success result is PAM_AUTHINFO_UNAVAIL, so as a
++   "sufficient" module it falls through to the password. The module itself
++   restricts use to the services allowed in /etc/faceauth/faceauth.conf and
++   to local, foreground sessions. */
++
++#ifdef HAVE_CONFIG_H
++#include <config.h>
++#endif
++
++#include <stdio.h>
++#include <string.h>
++#include <ctype.h>
++
++#include "pam-config.h"
++#include "pam-module.h"
++
++static int
++write_config_faceauth (pam_module_t *this, enum write_type op, FILE *fp)
++{
++  option_set_t *opt_set = this->get_opt_set (this, op);
++
++  if (debug)
++    debug_write_call (this, op);
++
++  if (!opt_set->is_enabled (opt_set, "is_enabled"))
++    return 0;
++
++  switch (op)
++    {
++    case AUTH:
++      fprintf (fp, "auth\tsufficient\tpam_faceauth.so\t");
++      break;
++    default:
++      break;
++    }
++
++  WRITE_CONFIG_OPTIONS
++
++  return 0;
++}
++
++GETOPT_START_1(AUTH)
++GETOPT_END_1(AUTH)
++
++PRINT_ARGS("faceauth")
++PRINT_XMLHELP("faceauth")
++
++/* ---- construct module object ---- */
++DECLARE_BOOL_OPTS_1 (is_enabled);
++DECLARE_STRING_OPTS_1 (timeout);
++DECLARE_OPT_SETS;
++
++static module_helptext_t helptext[] = {{NULL, NULL, NULL}};
++
++/* at last construct the complete module object */
++pam_module_t mod_pam_faceauth = { "pam_faceauth.so", opt_sets, helptext,
++				  &def_parse_config,
++				  &def_print_module,
++				  &write_config_faceauth,
++				  &get_opt_set,
++				  &getopt,
++				  &print_args,
++				  &print_xmlhelp,
++				  NULL,
++				  PAM_FACEAUTH_AUTH_PRIORITY,
++				  -1,
++				  -1,
++				  -1
++};

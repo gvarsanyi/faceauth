@@ -1,0 +1,13 @@
+[package]
+name = "faceauth-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Per-session notification agent for faceauth"
+
+[dependencies]
+faceauth-common = { workspace = true }
+zbus = { workspace = true }
+notify-rust = "4"
+gettext-rs = { workspace = true }

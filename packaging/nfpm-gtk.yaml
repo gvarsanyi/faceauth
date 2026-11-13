@@ -1,0 +1,30 @@
+# nfpm definition for the faceauth-gtk package (faceauth-settings for GNOME,
+# COSMIC, and other GTK desktops), staged with
+# "make install-gtk DESTDIR=packaging/staging/gtk".
+name: faceauth-gtk
+version: ${FACEAUTH_VERSION}
+arch: ${NFPM_ARCH}
+platform: linux
+maintainer: Greg Varsanyi <gvarsanyi@gmail.com>
+description: |-
+  GTK settings application for faceauth
+  libadwaita application for enrolling faces and choosing which services use
+  face authentication, for GNOME, COSMIC, and other desktops.
+homepage: https://github.com/gvarsanyi/faceauth
+license: MIT OR Apache-2.0
+
+overrides:
+  deb:
+    depends:
+      - faceauth (= ${FACEAUTH_VERSION})
+      - libadwaita-1-0 (>= 1.5)
+      - libgtk-4-1 (>= 4.14)
+  rpm:
+    depends:
+      - faceauth = ${FACEAUTH_VERSION}
+      - libadwaita
+
+contents:
+  - src: packaging/staging/gtk/usr
+    dst: /usr
+    type: tree

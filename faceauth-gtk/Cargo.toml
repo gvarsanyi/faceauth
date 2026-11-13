@@ -1,0 +1,19 @@
+[package]
+name = "faceauth-gtk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "GTK 4 / libadwaita settings app for faceauth (GNOME, COSMIC, others)"
+rust-version = "1.92"
+
+[[bin]]
+name = "faceauth-settings"
+path = "src/main.rs"
+
+[dependencies]
+faceauth-common = { workspace = true }
+gettext-rs = { workspace = true }
+async-channel = "2"
+# GTK 4.14 / libadwaita 1.5: Ubuntu 24.04, Debian 13, Fedora 40.
+gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_5"] }

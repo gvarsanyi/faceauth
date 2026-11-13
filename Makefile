@@ -1,206 +1,209 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
-MSGFMT := $(shell command -v msgfmt 2>/dev/null || true)
-NPROC := $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
+# --- Installation layout (override on the command line) ---
+PREFIX        ?= /usr
+BINDIR        ?= $(PREFIX)/bin
+LIBEXECDIR    ?= $(PREFIX)/libexec
+DATADIR       ?= $(PREFIX)/share
+MANDIR        ?= $(DATADIR)/man
+LOCALEDIR     ?= $(DATADIR)/locale
+SYSCONFDIR    ?= /etc
+UNITDIR       ?= $(PREFIX)/lib/systemd/system
+SYSUSERSDIR   ?= $(PREFIX)/lib/sysusers.d
+DBUSPOLICYDIR ?= $(DATADIR)/dbus-1/system.d
+DBUSSERVICEDIR ?= $(DATADIR)/dbus-1/system-services
+DBUSIFACEDIR  ?= $(DATADIR)/dbus-1/interfaces
+POLKITDIR     ?= $(DATADIR)/polkit-1/actions
+PAMCONFIGSDIR ?= $(DATADIR)/pam-configs
+# PAM module directory: first existing candidate on the build host.
+PAM_MODULE_DIR ?= $(firstword $(wildcard /usr/lib64/security /usr/lib/$(shell gcc -dumpmachine 2>/dev/null)/security /usr/lib/security) /usr/lib/security)
+DESTDIR       ?=
 
-BUILD_KCM_DIR := build-kcm
-KCM_SOURCE := faceauth-kcm
+# Build the KDE System Settings module and GUI (needs cmake, Qt 6, KF6).
+KCM ?= 1
+# Build faceauth-settings for GNOME/COSMIC (needs GTK 4.14, libadwaita 1.5).
+# Default: only if their development files are installed.
+GTK ?= $(shell pkg-config --exists 'gtk4 >= 4.14' 'libadwaita-1 >= 1.5' 2>/dev/null && echo 1 || echo 0)
 
-SYSTEMD_SERVICE := systemd/faceauth-daemon.service
-PAM_CONFIG_DROPIN := pam-config.d/pam_faceauth
-DEBIAN_PAM_CONFIG := pam-configs/faceauth
-KDE_FINGERPRINT_PAM := pam.d/kde-fingerprint
+CARGO     ?= cargo
+MSGFMT    ?= msgfmt
+NPROC     := $(shell nproc 2>/dev/null || echo 1)
+VERSION   := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+BUILD_KCM := build-kcm
+RELEASE   := target/release
 
-FACEAUTH_USER := faceauthd
-VIDEO_GROUP := video
+export FACEAUTH_LIBEXEC_DIR := $(LIBEXECDIR)
+export FACEAUTH_LOCALE_DIR := $(LOCALEDIR)
 
-NOLOGIN_SHELL := $(firstword $(wildcard /usr/sbin/nologin /sbin/nologin /bin/false))
-ifeq ($(strip $(NOLOGIN_SHELL)),)
-NOLOGIN_SHELL := /bin/false
+# Substitute install paths into *.in templates.
+SUBST = sed -e 's|@LIBEXECDIR@|$(LIBEXECDIR)|g' -e 's|@DATADIR@|$(DATADIR)|g' -e 's|@SYSUSERSDIR@|$(SYSUSERSDIR)|g'
+
+.PHONY: all rust kcm gtk test lint pot install install-rust install-kcm install-gtk uninstall \
+        deb rpm package clean help
+
+all: rust $(if $(filter 1,$(KCM)),kcm) $(if $(filter 1,$(GTK)),gtk)
+ifneq ($(GTK),1)
+	@echo "Skipped faceauth-settings (GTK app): gtk4/libadwaita development files not found."
 endif
 
-PAM_MOD_DIR := $(firstword $(wildcard /usr/lib64/security /usr/lib/security /lib/security))
-ifeq ($(strip $(PAM_MOD_DIR)),)
-PAM_MOD_DIR := /lib/security
-endif
+# Workspace selection for test/lint: faceauth-gtk only with GTK=1.
+CRATES := --workspace $(if $(filter 1,$(GTK)),,--exclude faceauth-gtk)
 
-LIBEXEC_DIR := $(if $(wildcard /usr/libexec),/usr/libexec,/usr/lib)
-export FACEAUTH_LIBEXEC_DIR := $(LIBEXEC_DIR)
+rust:
+	$(CARGO) build --release --locked
 
-POLKIT_ACTIONS_DIR := /usr/share/polkit-1/actions
+gtk:
+	$(CARGO) build --release --locked -p faceauth-gtk
 
-# --- Packaging (nfpm) ---
-VERSION        := $(shell grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-DIST_DIR       := dist
-STAGING_KDE    := packaging/staging-kde
-# Architecture string for nfpm (amd64, arm64, ...).  Override with NFPM_ARCH=arm64 make deb.
-NFPM_ARCH      ?= $(shell dpkg --print-architecture 2>/dev/null \
-                    || rpm --eval '%{_arch}' 2>/dev/null | sed 's/x86_64/amd64/;s/aarch64/arm64/' \
-                    || echo amd64)
-# PAM module directory used in the packages (distro-specific).
-# DEB: multiarch path (requires dpkg-architecture, falls back to x86_64-linux-gnu).
-# RPM: /usr/lib64/security on Fedora/RHEL x86_64, /usr/lib/security on openSUSE.
-DEB_PAM_MOD_DIR := /usr/lib/$(shell dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null \
-                       || echo x86_64-linux-gnu)/security
-RPM_PAM_MOD_DIR := $(firstword $(wildcard /usr/lib64/security /usr/lib/security) /usr/lib/security)
+kcm:
+	cmake -B $(BUILD_KCM) faceauth-kcm -DCMAKE_BUILD_TYPE=Release \
+	    -DCMAKE_INSTALL_PREFIX=$(PREFIX) -DFACEAUTH_VERSION=$(VERSION) -Wno-dev
+	cmake --build $(BUILD_KCM) -j$(NPROC)
 
-.PHONY: all build cli daemon notify pam kcm gui install-kcm \
-        compile-po staging-kde deb rpm package \
-        clean clean-kcm distclean install uninstall help
+test:
+	$(CARGO) test $(CRATES) --locked
 
-all: build
+lint:
+	$(CARGO) clippy $(CRATES) --all-targets --locked -- -D warnings
 
-build:
-	cargo build --release --manifest-path Cargo.toml
-	make kcm
+# Regenerate the translation templates (keeping their header comments) and
+# merge them into every catalog.
+XGETTEXT = xgettext --from-code=UTF-8 --package-name=faceauth --package-version=$(VERSION) \
+           --msgid-bugs-address=https://github.com/gvarsanyi/faceauth/issues
+KDE_KEYWORDS = -ki18n:1 -ki18nc:1c,2 -ki18np:1,2 -ki18ncp:1c,2,3
+merge_po = msgmerge -q -o "$(1).tmp" "$(1)" $(2) && msgattrib --no-obsolete -o "$(1)" "$(1).tmp" && rm -f "$(1).tmp"
+keep_header = { sed -n '/^\#, fuzzy/q;p' $(1); sed -n '/^\#, fuzzy/,$$p' $(2); } > $(1).new && mv $(1).new $(1) && rm -f $(2)
 
-cli:
-	cargo build --release --manifest-path Cargo.toml --package faceauth-cli --bin faceauth
+pot:
+	$(XGETTEXT) -L Rust -kgettext -kngettext:1,2 -o po/new.pot $(sort $(wildcard faceauth-*/src/*.rs))
+	$(call keep_header,po/faceauth.pot,po/new.pot)
+	for po in po/*.po; do $(call merge_po,$$po,po/faceauth.pot); done
+	$(XGETTEXT) -C $(KDE_KEYWORDS) -o kcm-cpp.pot faceauth-kcm/src/*.cpp
+	$(XGETTEXT) -L JavaScript $(KDE_KEYWORDS) -o kcm-qml.pot faceauth-kcm/src/ui/*.qml
+	msgcat --use-first -o faceauth-kcm/po/new.pot kcm-cpp.pot kcm-qml.pot && rm -f kcm-cpp.pot kcm-qml.pot
+	$(call keep_header,faceauth-kcm/po/kcm_faceauth.pot,faceauth-kcm/po/new.pot)
+	for po in faceauth-kcm/po/*/kcm_faceauth.po; do $(call merge_po,$$po,faceauth-kcm/po/kcm_faceauth.pot); done
 
-daemon:
-	cargo build --release --manifest-path Cargo.toml --package faceauth-daemon --bin faceauth-daemon
-
-notify:
-	cargo build --release --manifest-path Cargo.toml --package faceauth-notify --bin faceauth-notify
-
-pam:
-	cargo build --release --manifest-path Cargo.toml --package faceauth-pam
-
-kcm gui:
-	@command -v cmake >/dev/null 2>&1 || { echo "cmake not found (required for the 'kcm' target)"; exit 1; }
-	cmake -B $(BUILD_KCM_DIR) $(KCM_SOURCE) -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -Wno-dev
-	cmake --build $(BUILD_KCM_DIR) -j$(NPROC)
-
-install-kcm:
-	cmake --install $(BUILD_KCM_DIR)
-	./install-kde.sh
-	install -m 644 $(KCM_SOURCE)/org.faceauth.policy $(POLKIT_ACTIONS_DIR)/org.faceauth.policy
-
-compile-po:
-	@if [ -z "$(MSGFMT)" ]; then \
-	    echo "msgfmt not found -- skipping translations"; \
+# Files only; safe with DESTDIR (used for packaging).
+install-rust:
+	install -Dm755 $(RELEASE)/faceauth             $(DESTDIR)$(BINDIR)/faceauth
+	install -Dm755 $(RELEASE)/faceauth-daemon      $(DESTDIR)$(LIBEXECDIR)/faceauth-daemon
+	install -Dm755 $(RELEASE)/faceauth-agent       $(DESTDIR)$(LIBEXECDIR)/faceauth-agent
+	install -Dm644 $(RELEASE)/libpam_faceauth.so   $(DESTDIR)$(PAM_MODULE_DIR)/pam_faceauth.so
+	$(SUBST) data/faceauth-setup.sh > faceauth-setup.tmp
+	install -Dm755 faceauth-setup.tmp              $(DESTDIR)$(LIBEXECDIR)/faceauth-setup
+	rm -f faceauth-setup.tmp
+	$(SUBST) data/systemd/faceauth-daemon.service.in > faceauth-daemon.service.tmp
+	install -Dm644 faceauth-daemon.service.tmp     $(DESTDIR)$(UNITDIR)/faceauth-daemon.service
+	rm -f faceauth-daemon.service.tmp
+	$(SUBST) data/xdg/faceauth-agent.desktop.in > faceauth-agent.desktop.tmp
+	install -Dm644 faceauth-agent.desktop.tmp      $(DESTDIR)$(SYSCONFDIR)/xdg/autostart/faceauth-agent.desktop
+	rm -f faceauth-agent.desktop.tmp
+	$(SUBST) data/dbus/io.github.gvarsanyi.FaceAuth1.service.in > dbus-service.tmp
+	install -Dm644 dbus-service.tmp                $(DESTDIR)$(DBUSSERVICEDIR)/io.github.gvarsanyi.FaceAuth1.service
+	rm -f dbus-service.tmp
+	install -Dm644 data/dbus/io.github.gvarsanyi.FaceAuth1.conf $(DESTDIR)$(DBUSPOLICYDIR)/io.github.gvarsanyi.FaceAuth1.conf
+	install -Dm644 data/dbus/io.github.gvarsanyi.FaceAuth1.Manager.xml $(DESTDIR)$(DBUSIFACEDIR)/io.github.gvarsanyi.FaceAuth1.Manager.xml
+	install -Dm644 data/polkit/io.github.gvarsanyi.faceauth.policy $(DESTDIR)$(POLKITDIR)/io.github.gvarsanyi.faceauth.policy
+	install -Dm644 data/systemd/faceauth.sysusers  $(DESTDIR)$(SYSUSERSDIR)/faceauth.conf
+	install -Dm644 data/pam/kde-fingerprint        $(DESTDIR)$(DATADIR)/faceauth/kde-fingerprint
+	install -Dm644 assets/icons/faceauth.svg       $(DESTDIR)$(DATADIR)/icons/hicolor/scalable/apps/faceauth.svg
+	install -Dm644 data/pam/debian-pam-configs-faceauth  $(DESTDIR)$(PAMCONFIGSDIR)/faceauth
+	@if [ -e "$(DESTDIR)$(SYSCONFDIR)/faceauth/faceauth.conf" ]; then \
+	    echo "keeping existing $(DESTDIR)$(SYSCONFDIR)/faceauth/faceauth.conf"; \
 	else \
-	    for po in po/*.po; do \
-	        [ -f "$$po" ] || continue; \
-	        lang=$$(basename "$$po" .po); \
-	        mkdir -p packaging/locale/$$lang/LC_MESSAGES; \
-	        $(MSGFMT) -o packaging/locale/$$lang/LC_MESSAGES/faceauth.mo "$$po"; \
-	    done; \
+	    install -Dm644 data/faceauth.conf $(DESTDIR)$(SYSCONFDIR)/faceauth/faceauth.conf; \
+	fi
+	for page in man/*.[0-9]; do \
+	    install -Dm644 "$$page" "$(DESTDIR)$(MANDIR)/man$${page##*.}/$${page##*/}"; \
+	done
+	for po in po/*.po; do \
+	    lang=$$(basename "$$po" .po); \
+	    install -d "$(DESTDIR)$(LOCALEDIR)/$$lang/LC_MESSAGES"; \
+	    $(MSGFMT) -o "$(DESTDIR)$(LOCALEDIR)/$$lang/LC_MESSAGES/faceauth.mo" "$$po"; \
+	done
+
+# CMake rewrites install_manifest.txt on every install (also when staging
+# packages); keep the system install's list for uninstall.
+install-kcm:
+	DESTDIR=$(DESTDIR) cmake --install $(BUILD_KCM)
+	@if [ -z "$(DESTDIR)" ]; then cp $(BUILD_KCM)/install_manifest.txt $(BUILD_KCM)/system_manifest.txt; fi
+
+install-gtk:
+	install -Dm755 $(RELEASE)/faceauth-settings    $(DESTDIR)$(BINDIR)/faceauth-settings
+	install -Dm644 data/gtk/io.github.gvarsanyi.faceauth.Settings.desktop \
+	    $(DESTDIR)$(DATADIR)/applications/io.github.gvarsanyi.faceauth.Settings.desktop
+
+# Install, then configure the running system (skipped when staging).
+install: install-rust $(if $(filter 1,$(KCM)),install-kcm) $(if $(filter 1,$(GTK)),install-gtk)
+	@if [ -z "$(DESTDIR)" ]; then \
+	    $(LIBEXECDIR)/faceauth-setup configure; \
+	    echo; echo "Done. Enroll your face with: faceauth add"; \
+	    echo "Check the setup with:         faceauth doctor"; \
 	fi
 
-staging-kde: kcm
-	rm -rf $(STAGING_KDE)
-	@touch $(BUILD_KCM_DIR)/install_manifest.txt 2>/dev/null || \
-	    sudo chown "$(shell id -u):$(shell id -g)" $(BUILD_KCM_DIR)/install_manifest.txt
-	DESTDIR=$(abspath $(STAGING_KDE)) cmake --install $(BUILD_KCM_DIR)
-	install -D -m 644 $(KCM_SOURCE)/org.faceauth.policy \
-	    $(STAGING_KDE)/usr/share/polkit-1/actions/org.faceauth.policy
+uninstall:
+	-$(LIBEXECDIR)/faceauth-setup unconfigure
+	-$(LIBEXECDIR)/faceauth-setup purge
+	rm -f $(BINDIR)/faceauth $(BINDIR)/faceauth-settings $(LIBEXECDIR)/faceauth-daemon $(LIBEXECDIR)/faceauth-agent \
+	      $(DATADIR)/applications/io.github.gvarsanyi.faceauth.Settings.desktop \
+	      $(DATADIR)/icons/hicolor/scalable/apps/faceauth.svg \
+	      $(SYSCONFDIR)/xdg/autostart/faceauth-agent.desktop \
+	      $(LIBEXECDIR)/faceauth-setup $(PAM_MODULE_DIR)/pam_faceauth.so \
+	      $(UNITDIR)/faceauth-daemon.service \
+	      $(DBUSSERVICEDIR)/io.github.gvarsanyi.FaceAuth1.service \
+	      $(DBUSPOLICYDIR)/io.github.gvarsanyi.FaceAuth1.conf \
+	      $(DBUSIFACEDIR)/io.github.gvarsanyi.FaceAuth1.Manager.xml \
+	      $(POLKITDIR)/io.github.gvarsanyi.faceauth.policy \
+	      $(SYSUSERSDIR)/faceauth.conf $(PAMCONFIGSDIR)/faceauth \
+	      $(LOCALEDIR)/*/LC_MESSAGES/faceauth.mo
+	rm -rf $(DATADIR)/faceauth
+	for page in man/*.[0-9]; do rm -f "$(MANDIR)/man$${page##*.}/$${page##*/}"; done
+	if [ -f $(BUILD_KCM)/system_manifest.txt ]; then xargs rm -f < $(BUILD_KCM)/system_manifest.txt; fi
+	@echo "Kept $(SYSCONFDIR)/faceauth/faceauth.conf and the faceauthd account."
+	-systemctl daemon-reload
 
-deb: build compile-po staging-kde
-	@command -v nfpm >/dev/null 2>&1 || { echo "nfpm not found -- install from https://nfpm.goreleaser.com"; exit 1; }
-	mkdir -p $(DIST_DIR)
-	FACEAUTH_VERSION=$(VERSION) \
-	FACEAUTH_LIBEXEC_DIR=/usr/libexec \
-	FACEAUTH_PAM_MOD_DIR=$(DEB_PAM_MOD_DIR) \
-	NFPM_ARCH=$(NFPM_ARCH) \
-	nfpm package -f packaging/nfpm-main.yaml -t $(DIST_DIR) -p deb
-	FACEAUTH_VERSION=$(VERSION) \
-	NFPM_ARCH=$(NFPM_ARCH) \
-	nfpm package -f packaging/nfpm-kde.yaml -t $(DIST_DIR) -p deb
+# --- Packaging (nfpm: https://nfpm.goreleaser.com) ---
+NFPM_ARCH ?= $(shell dpkg --print-architecture 2>/dev/null || uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+STAGE     := packaging/staging
 
-rpm: build compile-po staging-kde
-	@command -v nfpm >/dev/null 2>&1 || { echo "nfpm not found -- install from https://nfpm.goreleaser.com"; exit 1; }
-	mkdir -p $(DIST_DIR)
-	FACEAUTH_VERSION=$(VERSION) \
-	FACEAUTH_LIBEXEC_DIR=/usr/libexec \
-	FACEAUTH_PAM_MOD_DIR=$(RPM_PAM_MOD_DIR) \
-	NFPM_ARCH=$(NFPM_ARCH) \
-	nfpm package -f packaging/nfpm-main.yaml -t $(DIST_DIR) -p rpm
-	FACEAUTH_VERSION=$(VERSION) \
-	NFPM_ARCH=$(NFPM_ARCH) \
-	nfpm package -f packaging/nfpm-kde.yaml -t $(DIST_DIR) -p rpm
+define nfpm_package
+	rm -rf $(STAGE)
+	$(MAKE) install-rust DESTDIR=$(abspath $(STAGE))/main PAM_MODULE_DIR=$(2)
+	mkdir -p dist
+	$(call nfpm,main,$(1))
+	$(if $(filter 1,$(KCM)),DESTDIR=$(abspath $(STAGE))/kde cmake --install $(BUILD_KCM))
+	$(if $(filter 1,$(KCM)),$(call nfpm,kde,$(1)))
+	$(if $(filter 1,$(GTK)),$(MAKE) install-gtk DESTDIR=$(abspath $(STAGE))/gtk)
+	$(if $(filter 1,$(GTK)),$(call nfpm,gtk,$(1)))
+endef
+
+# $(1): package (main, kde, gtk); $(2): format (deb, rpm).
+nfpm = FACEAUTH_VERSION=$(VERSION) NFPM_ARCH=$(NFPM_ARCH) nfpm package -f packaging/nfpm-$(1).yaml -t dist -p $(2)
+
+deb: all
+	$(call nfpm_package,deb,/usr/lib/$(shell dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo x86_64-linux-gnu)/security)
+
+rpm: all
+	$(call nfpm_package,rpm,$(firstword $(wildcard /usr/lib64/security) /usr/lib/security))
 
 package: deb rpm
 
-install:
-	@command -v systemctl >/dev/null 2>&1 || { echo "systemctl is required to install faceauth"; exit 1; }
-	# install binaries
-	install -m 755 target/release/faceauth /usr/bin/faceauth
-	install -m 755 target/release/faceauth-daemon $(FACEAUTH_LIBEXEC_DIR)/faceauth-daemon
-	install -m 755 target/release/faceauth-notify $(FACEAUTH_LIBEXEC_DIR)/faceauth-notify
-	install -d -m 755 $(PAM_MOD_DIR)
-	install -m 644 target/release/libpam_faceauth.so $(PAM_MOD_DIR)/pam_faceauth.so
-	useradd --system --no-create-home --shell $(NOLOGIN_SHELL) --groups $(VIDEO_GROUP) $(FACEAUTH_USER) || true
-	usermod -aG $(VIDEO_GROUP) $(FACEAUTH_USER)
-	# Setting up model directory
-	mkdir -p /etc/security/faceauth
-	chown $(FACEAUTH_USER):$(FACEAUTH_USER) /etc/security/faceauth
-	chmod 750 /etc/security/faceauth
-	# Installing systemd service
-	install -m 644 $(SYSTEMD_SERVICE) /etc/systemd/system/faceauth-daemon.service
-	if [ "$(FACEAUTH_LIBEXEC_DIR)" != "/usr/libexec" ]; then \
-        sed -i "s|/usr/libexec/|$(FACEAUTH_LIBEXEC_DIR)/|g" /etc/systemd/system/faceauth-daemon.service; \
-	fi
-	systemctl daemon-reload
-	systemctl enable faceauth-daemon
-	systemctl restart faceauth-daemon
-	# Installing translations (if available)
-	for po in po/*.po; do \
-		[ -f "$$po" ] || continue; \
-		lang=$$(basename "$$po" .po); \
-		locale_dir="/usr/share/locale/$$lang/LC_MESSAGES"; \
-		mkdir -p "$$locale_dir"; \
-		msgfmt -o "$$locale_dir/faceauth.mo" "$$po"; \
-	done
-	# Install PAM configuration
-	./install-pam.sh
-	# Install KDE plugin & KCM
-	make install-kcm
-	@echo ""
-	@echo "Done. faceauth-daemon is running."
-	@echo "Enroll your face with:"
-	@echo "    faceauth add"
-
-uninstall:
-	systemctl disable --now faceauth-daemon || true
-	rm -f /etc/systemd/system/faceauth-daemon.service
-	systemctl daemon-reload
-	rm -f /usr/bin/faceauth
-	rm -f $(FACEAUTH_LIBEXEC_DIR)/faceauth-daemon
-	rm -f $(FACEAUTH_LIBEXEC_DIR)/faceauth-notify
-	rm -f $(PAM_MOD_DIR)/pam_faceauth.so
-	if [ -d /usr/share/locale ]; then \
-		for mo in /usr/share/locale/*/LC_MESSAGES/faceauth.mo; do \
-			[ -f "$$mo" ] && rm -f "$$mo"; \
-		done; \
-	fi
-	pam-auth-update --remove faceauth >/dev/null 2>&1 || true
-	rm -f /usr/lib/pam-config.d/pam_faceauth || true
-	rm -f /usr/share/pam-configs/faceauth || true
-	rm -f /etc/security/faceauth || true
-	rm -f /etc/pam.d/kde-fingerprint || true
-
 clean:
-	cargo clean
-	rm -rf $(BUILD_KCM_DIR) $(STAGING_KDE) packaging/locale $(DIST_DIR)
+	$(CARGO) clean
+	rm -rf $(BUILD_KCM) $(STAGE) dist
 
 help:
-	@echo "Common targets:"
-	@echo "  make            Build all components (release)"
-	@echo "  make build      Build all components (release)"
-	@echo "  make cli        Build the CLI binary"
-	@echo "  make daemon     Build the daemon binary"
-	@echo "  make notify     Build the notification helper"
-	@echo "  make pam        Build the PAM module"
-	@echo "  make kcm        Configure & build the KDE System Settings module"
-	@echo "  make install    Install faceauth"
-	@echo "  make uninstall  Remove installed files"
-	@echo "  make clean      Clean Cargo artifacts, CMake build dir, and packaging artifacts"
+	@echo "Targets:"
+	@echo "  make                 build everything (KCM=0 skips the KDE module; GTK=0/1 overrides GTK detection)"
+	@echo "  make test            run the test suite"
+	@echo "  make lint            run clippy with warnings as errors"
+	@echo "  make pot             regenerate translation templates and merge catalogs"
+	@echo "  sudo make install    install and configure the system"
+	@echo "  make install DESTDIR=/tmp/stage   stage files only (no system changes)"
+	@echo "  sudo make uninstall  unconfigure, delete enrolled face data, remove files"
+	@echo "  make deb | rpm       build packages into dist/ (needs nfpm)"
 	@echo ""
-	@echo "Packaging targets (require nfpm: https://nfpm.goreleaser.com):"
-	@echo "  make deb        Build faceauth and faceauth-kde .deb packages -> dist/"
-	@echo "  make rpm        Build faceauth and faceauth-kde .rpm packages -> dist/"
-	@echo "  make package    Build both deb and rpm packages"
-	@echo ""
-	@echo "  NFPM_ARCH=arm64 make deb   Override target architecture"
+	@echo "Layout variables: PREFIX BINDIR LIBEXECDIR DATADIR SYSCONFDIR UNITDIR"
+	@echo "  PAM_MODULE_DIR (detected: $(PAM_MODULE_DIR))"

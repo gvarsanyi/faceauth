@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 #include "FaceAuthKcm.h"
 
 #include <KPluginFactory>
@@ -8,7 +9,7 @@ FaceAuthKcm::FaceAuthKcm(QObject *parent, const KPluginMetaData &data)
     : KQuickConfigModule(parent, data)
     , m_backend(new FaceAuthBackend(this))
 {
-    // No Apply / Cancel / Defaults toolbar buttons — every action in this KCM
+    // No Apply / Cancel / Defaults toolbar buttons; every action in this KCM
     // is applied immediately to the daemon, matching the CLI behaviour.
     setButtons(KQuickConfigModule::NoAdditionalButton);
 }

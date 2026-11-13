@@ -2,12 +2,15 @@
 name = "faceauth-pam"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "PAM module for faceauth face authentication"
 
 [lib]
 name = "pam_faceauth"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-faceauth-core = { path = "../faceauth-core" }
+faceauth-common = { workspace = true }
 pamsm = { version = "0.5.5", features = ["libpam"] }
-libc = "0.2"
+libc = { workspace = true }

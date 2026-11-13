@@ -1,77 +1,49 @@
-/// Build script: download and decompress the dlib pre-trained model files if
-/// they are not already present under `models/`.
-///
-/// Downloads are performed via `curl`, which handles HTTPS and redirects.
-/// The `bzip2` crate decompresses in-process.  The `.dat` files are listed in
-/// `.gitignore` and must never be committed to the repository.
-use std::fs;
+//! Verify the committed dlib models against pinned SHA-256 hashes and
+//! decompress them into OUT_DIR for `include_bytes!`. No network access.
+
 use std::io::Read;
 use std::path::Path;
-use std::process::Command;
 
-const MODELS: &[(&str, &str)] = &[
+use sha2::{Digest, Sha256};
+
+/// (file name without .bz2, SHA-256 of the .bz2, SHA-256 of the decompressed file)
+const MODELS: &[(&str, &str, &str)] = &[
     (
         "shape_predictor_5_face_landmarks.dat",
-        "https://dlib.net/files/shape_predictor_5_face_landmarks.dat.bz2",
+        "6e787bbebf5c9efdb793f6cd1f023230c4413306605f24f299f12869f95aa472",
+        "c4b1e9804792707d3a405c2c16a80a20269e6675021f64a41d30fffafbc41888",
     ),
     (
         "dlib_face_recognition_resnet_model_v1.dat",
-        "https://dlib.net/files/dlib_face_recognition_resnet_model_v1.dat.bz2",
+        "abb1f61041e434465855ce81c2bd546e830d28bcbed8d27ffbe5bb408b11553a",
+        "55533b28a95800a551ba546ba62fe69625c7e95a7061c338adffead08719da30",
     ),
 ];
 
+fn sha256_hex(data: &[u8]) -> String {
+    Sha256::digest(data).iter().map(|b| format!("{b:02x}")).collect()
+}
+
 fn main() {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    let models_dir = Path::new(&manifest_dir).join("models");
+    let out_dir = std::env::var("OUT_DIR").unwrap();
 
-    fs::create_dir_all(&models_dir).expect("failed to create models/ directory");
+    for (name, bz2_hash, dat_hash) in MODELS {
+        let src = Path::new(&manifest_dir).join("models").join(format!("{name}.bz2"));
+        println!("cargo:rerun-if-changed={}", src.display());
 
-    for (filename, url) in MODELS {
-        let dest = models_dir.join(filename);
+        let compressed = std::fs::read(&src).unwrap_or_else(|e| panic!("cannot read {}: {e}", src.display()));
+        let actual = sha256_hex(&compressed);
+        assert_eq!(&actual, bz2_hash, "checksum mismatch for {}", src.display());
 
-        // Tell Cargo to rerun this script if the file appears or disappears.
-        println!("cargo:rerun-if-changed={}", dest.display());
+        let mut data = Vec::new();
+        bzip2::read::BzDecoder::new(compressed.as_slice())
+            .read_to_end(&mut data)
+            .unwrap_or_else(|e| panic!("cannot decompress {}: {e}", src.display()));
+        let actual = sha256_hex(&data);
+        assert_eq!(&actual, dat_hash, "checksum mismatch for decompressed {name}");
 
-        if dest.exists() {
-            continue;
-        }
-
-        eprintln!("build: downloading {} ...", filename);
-        let compressed = curl_fetch(url)
-            .unwrap_or_else(|e| panic!("failed to download {url}: {e}"));
-
-        eprintln!("build: decompressing {} ({} bytes compressed) ...", filename, compressed.len());
-        let data = decompress_bz2(&compressed)
-            .unwrap_or_else(|e| panic!("failed to decompress {filename}: {e}"));
-
-        fs::write(&dest, &data)
-            .unwrap_or_else(|e| panic!("failed to write {}: {e}", dest.display()));
-
-        eprintln!("build: wrote {} ({} bytes)", dest.display(), data.len());
+        let dest = Path::new(&out_dir).join(name);
+        std::fs::write(&dest, &data).unwrap_or_else(|e| panic!("cannot write {}: {e}", dest.display()));
     }
-}
-
-/// Download a URL and return the raw bytes, using the system `curl`.
-/// Follows redirects (-L) and fails on HTTP errors (-f).
-fn curl_fetch(url: &str) -> Result<Vec<u8>, String> {
-    let output = Command::new("curl")
-        .args(["--silent", "--show-error", "--location", "--fail", "--output", "-", url])
-        .output()
-        .map_err(|e| format!("failed to run curl: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("curl exited with {}: {}", output.status, stderr.trim()));
-    }
-
-    Ok(output.stdout)
-}
-
-/// Decompress bzip2 data using the `bzip2` crate.
-fn decompress_bz2(data: &[u8]) -> Result<Vec<u8>, String> {
-    use bzip2::read::BzDecoder;
-    let mut decoder = BzDecoder::new(data);
-    let mut out = Vec::new();
-    decoder.read_to_end(&mut out).map_err(|e| format!("bzip2 decode: {e}"))?;
-    Ok(out)
 }

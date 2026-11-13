@@ -1,0 +1,175 @@
+# German translation of the faceauth KDE module.
+# Copyright (C) Greg Varsanyi
+# This file is distributed under the same license as the faceauth package.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: faceauth\n"
+"Report-Msgid-Bugs-To: https://github.com/gvarsanyi/faceauth/issues\n"
+"POT-Creation-Date: 2026-11-12 22:28-0800\n"
+"PO-Revision-Date: 2026-11-12 00:00+0000\n"
+"Last-Translator: faceauth contributors\n"
+"Language-Team: German\n"
+"Language: de\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"#-#-#-#-#  cpp.pot (PACKAGE VERSION)  #-#-#-#-#\n"
+"#-#-#-#-#  qml.pot (PACKAGE VERSION)  #-#-#-#-#\n"
+
+#: faceauth-kcm/src/main.cpp:21
+msgid "Face Authentication"
+msgstr "Gesichtsauthentifizierung"
+
+#: faceauth-kcm/src/main.cpp:23
+msgid "Enroll your face and choose where face authentication is used"
+msgstr ""
+"Gesicht registrieren und festlegen, wo die Gesichtsauthentifizierung "
+"verwendet wird"
+
+#: faceauth-kcm/src/main.cpp:25
+msgid "Copyright (C) Greg Varsanyi"
+msgstr "Copyright (C) Greg Varsanyi"
+
+#: faceauth-kcm/src/ui/main.qml:89
+msgid "The face authentication service (faceauth-daemon) is not available"
+msgstr ""
+"Der Dienst für die Gesichtsauthentifizierung (faceauth-daemon) ist nicht "
+"verfügbar"
+
+#: faceauth-kcm/src/ui/main.qml:92
+msgid "Retry"
+msgstr "Erneut versuchen"
+
+#: faceauth-kcm/src/ui/main.qml:111 faceauth-kcm/src/ui/main.qml:308
+#: faceauth-kcm/src/ui/main.qml:363
+msgid "Close"
+msgstr "Schließen"
+
+#: faceauth-kcm/src/ui/main.qml:124
+msgid "Status"
+msgstr "Status"
+
+#: faceauth-kcm/src/ui/main.qml:128
+msgid "Service:"
+msgstr "Dienst:"
+
+#: faceauth-kcm/src/ui/main.qml:129
+msgid "Available"
+msgstr "Verfügbar"
+
+#: faceauth-kcm/src/ui/main.qml:129
+msgid "Available, no face model data"
+msgstr "Verfügbar, keine Gesichtsdaten"
+
+#: faceauth-kcm/src/ui/main.qml:134 faceauth-kcm/src/ui/main.qml:275
+msgid "Test Face Authentication"
+msgstr "Gesichtsauthentifizierung testen"
+
+#: faceauth-kcm/src/ui/main.qml:153
+msgid "Enrollment"
+msgstr "Registrierung"
+
+#: faceauth-kcm/src/ui/main.qml:159
+msgid "Camera:"
+msgstr "Kamera:"
+
+#: faceauth-kcm/src/ui/main.qml:188
+msgid "Enrolled camera not connected"
+msgstr "Registrierte Kamera nicht angeschlossen"
+
+#: faceauth-kcm/src/ui/main.qml:194
+msgid "Face Model Data:"
+msgstr "Gesichtsdaten:"
+
+#: faceauth-kcm/src/ui/main.qml:198
+msgid "Add More"
+msgstr "Weitere hinzufügen"
+
+#: faceauth-kcm/src/ui/main.qml:198
+msgid "Add"
+msgstr "Hinzufügen"
+
+#: faceauth-kcm/src/ui/main.qml:209
+msgid "Delete All"
+msgstr "Alle löschen"
+
+#: faceauth-kcm/src/ui/main.qml:220
+msgid "Services"
+msgstr "Dienste"
+
+#: faceauth-kcm/src/ui/main.qml:224
+msgid "Never used for:"
+msgstr "Nie verwendet für:"
+
+#: faceauth-kcm/src/ui/main.qml:225
+msgid "Remote sessions (SSH, remote desktop), including sudo inside them"
+msgstr "Entfernte Sitzungen (SSH, Remote-Desktop), einschließlich sudo darin"
+
+#: faceauth-kcm/src/ui/main.qml:230
+msgid "Background processes and sessions that are not in the foreground"
+msgstr "Hintergrundprozesse und Sitzungen, die nicht im Vordergrund sind"
+
+#: faceauth-kcm/src/ui/main.qml:235
+msgid "Use for:"
+msgstr "Verwenden für:"
+
+#: faceauth-kcm/src/ui/main.qml:241
+msgid "(no services enabled by the administrator)"
+msgstr "(keine Dienste vom Administrator freigegeben)"
+
+#: faceauth-kcm/src/ui/main.qml:249
+msgid ""
+"The administrator chooses the available services in /etc/faceauth/"
+"faceauth.conf."
+msgstr ""
+"Der Administrator legt die verfügbaren Dienste in /etc/faceauth/"
+"faceauth.conf fest."
+
+#: faceauth-kcm/src/ui/main.qml:288
+msgid "Authentication failed: %1"
+msgstr "Authentifizierung fehlgeschlagen: %1"
+
+#: faceauth-kcm/src/ui/main.qml:295 faceauth-kcm/src/ui/main.qml:342
+msgid "Look at the camera..."
+msgstr "Bitte in die Kamera schauen..."
+
+#: faceauth-kcm/src/ui/main.qml:295
+msgid "Authentication successful!"
+msgstr "Authentifizierung erfolgreich!"
+
+#: faceauth-kcm/src/ui/main.qml:295
+msgid "Failed"
+msgstr "Fehlgeschlagen"
+
+#: faceauth-kcm/src/ui/main.qml:319
+msgid "Enroll Face"
+msgstr "Gesicht registrieren"
+
+#: faceauth-kcm/src/ui/main.qml:339
+msgid "Enrollment failed: %1"
+msgstr "Registrierung fehlgeschlagen: %1"
+
+#: faceauth-kcm/src/ui/main.qml:341
+msgid "Enrollment complete!"
+msgstr "Registrierung abgeschlossen!"
+
+#: faceauth-kcm/src/ui/main.qml:350
+msgid "Vary your angle slightly between each capture."
+msgstr "Zwischen den Aufnahmen den Blickwinkel leicht verändern."
+
+#: faceauth-kcm/src/ui/main.qml:363
+msgid "Cancel"
+msgstr "Abbrechen"
+
+#: faceauth-kcm/src/ui/main.qml:373
+msgid "Clear Face Data?"
+msgstr "Gesichtsdaten löschen?"
+
+#: faceauth-kcm/src/ui/main.qml:374
+msgid ""
+"All enrolled face data will be permanently removed. You will need to enroll "
+"again to use face authentication."
+msgstr ""
+"Alle registrierten Gesichtsdaten werden dauerhaft entfernt. Für die "
+"Gesichtsauthentifizierung ist danach eine erneute Registrierung nötig."

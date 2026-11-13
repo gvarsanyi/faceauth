@@ -1,0 +1,46 @@
+[Unit]
+Description=faceauth face authentication daemon
+Documentation=man:faceauth-daemon(8) https://github.com/gvarsanyi/faceauth
+
+# Started on demand by D-Bus activation; no [Install] section is needed.
+[Service]
+Type=dbus
+BusName=io.github.gvarsanyi.FaceAuth1
+ExecStart=@LIBEXECDIR@/faceauth-daemon
+User=faceauthd
+Group=faceauthd
+# /dev/video* is root:video 0660.
+SupplementaryGroups=video
+
+StateDirectory=faceauth
+StateDirectoryMode=0700
+UMask=0077
+
+DevicePolicy=closed
+DeviceAllow=char-video4linux rw
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM

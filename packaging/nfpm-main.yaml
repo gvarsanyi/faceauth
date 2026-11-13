@@ -1,0 +1,37 @@
+# nfpm definition for the faceauth package (daemon, PAM module, CLI).
+# Built by "make deb" / "make rpm" from the tree staged with
+# "make install-rust DESTDIR=packaging/staging/main".
+name: faceauth
+version: ${FACEAUTH_VERSION}
+arch: ${NFPM_ARCH}
+platform: linux
+maintainer: Greg Varsanyi <gvarsanyi@gmail.com>
+description: |-
+  Face authentication for Linux (PAM module and daemon)
+  Matches the user's face with a webcam (preferably IR) and integrates with
+  PAM so face recognition can supplement passwords for sudo, polkit, and
+  screen unlock.
+homepage: https://github.com/gvarsanyi/faceauth
+license: MIT OR Apache-2.0
+
+overrides:
+  deb:
+    depends: [libpam-runtime, systemd, dbus, polkitd | policykit-1]
+  rpm:
+    depends: [pam, systemd, dbus, polkit]
+
+scripts:
+  postinstall: packaging/scripts/postinstall.sh
+  preremove: packaging/scripts/preremove.sh
+  postremove: packaging/scripts/postremove.sh
+
+contents:
+  - src: packaging/staging/main/usr
+    dst: /usr
+    type: tree
+  - src: data/faceauth.conf
+    dst: /etc/faceauth/faceauth.conf
+    type: config|noreplace
+  - src: packaging/staging/main/etc/xdg/autostart/faceauth-agent.desktop
+    dst: /etc/xdg/autostart/faceauth-agent.desktop
+    type: config

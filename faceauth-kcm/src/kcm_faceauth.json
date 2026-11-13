@@ -1,12 +1,12 @@
 {
   "KPlugin": {
-    "Authors": [{ "Name": "faceauth contributors" }],
-    "Description": "Manage face authentication enrollment and settings",
+    "Authors": [{ "Name": "Greg Varsanyi", "Email": "gvarsanyi@gmail.com" }],
+    "Description": "Enroll your face and choose where face authentication is used",
     "Icon": "faceauth",
-    "License": "GPL-2.0-or-later",
+    "License": "MIT OR Apache-2.0",
     "Name": "Face Authentication",
-    "Version": "0.8.0"
+    "Website": "https://github.com/gvarsanyi/faceauth"
   },
-  "X-KDE-Keywords": "face,authentication,biometric,enroll,camera",
+  "X-KDE-Keywords": "face,authentication,biometric,enroll,camera,unlock",
   "X-KDE-System-Settings-Parent-Category": "security-privacy"
 }

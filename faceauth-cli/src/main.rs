@@ -1,28 +1,37 @@
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
+//! `faceauth`: command-line front end for faceauth-daemon.
+
+use std::io::{BufRead, Write};
 use std::process;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use faceauth_core::ipc::{Request, Response, SOCKET_PATH};
-use faceauth_core::model::FaceModel;
-use faceauth_core::{
-    camera_name_for_index, encoding_distance, load_model_from_json, username_for_uid,
+use faceauth_common::client::Client;
+use faceauth_common::config::{ENROLL_CAPTURES, ENROLL_CAPTURE_TIMEOUT_SECS};
+use faceauth_common::dbus::{
+    preferred_camera, CameraTuple, Error, ENROLLED_CAMERA, STATUS_TOO_SIMILAR, SUITABILITY_IR,
+    SUITABILITY_POSSIBLE_IR,
 };
+use faceauth_common::{users, v4l};
 use gettextrs::gettext;
+use serde_json::json;
 
-mod camera;
+mod agent;
+mod doctor;
+
+/// Covers polkit prompts plus every enrollment capture.
+const METHOD_TIMEOUT: Duration =
+    Duration::from_secs(120 + (ENROLL_CAPTURES * ENROLL_CAPTURE_TIMEOUT_SECS) as u64);
 
 #[derive(Parser)]
 #[command(
     name = "faceauth",
-    about = "Facial recognition authentication tool",
+    about = "Face authentication for Linux",
     version,
     arg_required_else_help = true
 )]
 struct Cli {
-    /// User to operate on. Defaults to the current user.
-    /// Root may specify any username to manage another user's model.
+    /// Account to operate on (default: the current user). Managing another
+    /// account requires administrator authorization.
     #[arg(long, short = 'u', global = true)]
     user: Option<String>,
 
@@ -32,565 +41,372 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Enroll a face model for a user.
+    /// Enroll a new batch of face captures.
     ///
-    /// Asks the faceauth daemon to capture a face encoding from the camera,
-    /// then sends it to the daemon for storage. Requires the daemon to be running.
-    ///
-    /// Encodings are appended to any already stored. Use `clear --index N` to
-    /// remove a specific batch, or `clear` to remove all stored batches.
+    /// The daemon captures 5 encodings from different angles. The first
+    /// enrollment selects the camera; later ones reuse it.
     Add {
-        /// Seconds to wait for a single-face frame before giving up.
-        #[arg(short, long, default_value_t = 30)]
-        timeout: u64,
-
-        /// Camera to use. Accepts a device index (e.g. 2), a full device path
-        /// (/dev/video2), or a stable udev name from /dev/v4l/by-id/ or
-        /// /dev/v4l/by-path/. Required in non-interactive mode (e.g. scripts);
-        /// omit to be prompted interactively. `cameras` shows available options.
+        /// Camera: index (2), device path (/dev/video2), or udev name from
+        /// /dev/v4l/by-id or /dev/v4l/by-path. Prompted for if omitted on a
+        /// first enrollment in a terminal.
         #[arg(short, long)]
         camera: Option<String>,
     },
 
-    /// Test face authentication for a user.
-    ///
-    /// Exits 0 on success, 1 on failure (no match or timeout).
-    /// The camera used during enrollment is stored in the model and reused automatically.
+    /// Test face authentication (exit status 0 on success).
     Test {
-        /// Seconds to attempt authentication before failing.
-        #[arg(short, long, default_value_t = 5)]
-        timeout: u64,
-    },
-
-    /// Remove all stored face encodings for a user.
-    ///
-    /// Without `--index`, removes the entire face model. With `--index N`,
-    /// removes only enrollment batch N (0-based); run `faceauth info` to see
-    /// how many batches are enrolled.
-    Clear {
-        /// Remove only this enrollment batch (0-based index) instead of all batches.
+        /// Seconds to try before failing (default: configured, max 30).
         #[arg(short, long)]
-        index: Option<usize>,
+        timeout: Option<u32>,
     },
 
-    /// Show information about a user's stored face model.
-    Info,
-
-    /// List available camera devices and their suitability for face authentication.
-    Cameras,
-
-    /// Opt out a PAM service from face authentication for this user.
-    ///
-    /// Writes a `-service` entry to the user's opt file. Face auth is skipped
-    /// when this service requests it. Use `unignore` to re-enable.
-    Ignore {
-        /// PAM service name to opt out (e.g. "sudo").
-        requestor: String,
+    /// Delete enrolled face data.
+    Clear {
+        /// Delete only this enrollment batch (0-based; see `info`).
+        #[arg(short, long)]
+        batch: Option<u32>,
+        /// Do not ask for confirmation.
+        #[arg(short, long)]
+        yes: bool,
     },
 
-    /// Re-enable face authentication for a PAM service for this user.
-    ///
-    /// Writes a `+service` entry to the user's opt file, overriding any
-    /// previous opt-out. Use `ignore` to opt back out.
-    Unignore {
-        /// PAM service name to re-enable (e.g. "sudo").
-        requestor: String,
+    /// Show the enrolled model.
+    Info {
+        #[arg(long)]
+        json: bool,
     },
 
-    /// List known PAM services and their opt-in status for this user.
+    /// List cameras and their suitability.
+    Cameras {
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show or change which services use face authentication for you.
     ///
-    /// Shows all services recorded in the global opt file and any user
-    /// overrides. A `+` prefix means face auth is active for that service;
-    /// `-` means it is skipped.
-    Services,
+    /// The administrator decides which PAM services may use face
+    /// authentication (/etc/faceauth/faceauth.conf); you can disable any of
+    /// them for your account.
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
+
+    /// Check the installation and report problems.
+    Doctor {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
-/// Send a request to the daemon and return the response.
-/// Returns `None` if the daemon socket is not available.
-fn daemon_request(req: &Request) -> Option<Response> {
-    let stream = UnixStream::connect(SOCKET_PATH).ok()?;
-    // Set a generous read timeout so long-running requests (e.g. Authenticate)
-    // don't block forever if the daemon hangs or the client is killed.
-    stream
-        .set_read_timeout(Some(Duration::from_secs(120)))
-        .ok()?;
-    let mut json = serde_json::to_string(req).ok()?;
-    json.push('\n');
-    (&stream).write_all(json.as_bytes()).ok()?;
-
-    let mut reader = BufReader::new(&stream);
-    let mut line = String::new();
-    reader.read_line(&mut line).ok()?;
-    serde_json::from_str(line.trim()).ok()
+#[derive(Subcommand)]
+enum ServiceAction {
+    /// List services and whether face authentication is enabled.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Use face authentication for SERVICE.
+    Enable { service: String },
+    /// Stop using face authentication for SERVICE.
+    Disable { service: String },
 }
 
-/// Prompt for the current user's password and verify it via PAM.
-///
-/// Skipped silently when running as root. Returns an error string on failure
-/// (wrong password, PAM error, or I/O error reading the terminal).
-fn verify_password(username: &str) -> Result<(), String> {
-    if unsafe { libc::getuid() } == 0 {
-        return Ok(());
-    }
-    let password = rpassword::prompt_password(format!("[faceauth] Password for {username}: "))
-        .map_err(|e| e.to_string())?;
-    let mut auth = pam::Authenticator::with_password("passwd").map_err(|e| e.to_string())?;
-    auth.get_handler().set_credentials(username, password);
-    auth.authenticate().map_err(|_| "authentication failed".to_string())
-}
-
-/// Return true if the error string means the user has no enrolled model.
-///
-/// Two distinct messages are possible: the daemon's own "no model enrolled for"
-/// and `FaceAuthError::ModelNotFound`'s display when the direct-disk fallback is used.
-fn is_model_not_found(e: &str) -> bool {
-    e.contains("no model enrolled") || e.contains("No face model found")
-}
-
-/// Fetch a user's model via the daemon.
-///
-/// Returns `Ok(model)` on success, or an error string on failure.
-fn load_model(username: &str) -> Result<FaceModel, String> {
-    let req = Request::LoadModel {
-        username: username.to_string(),
-    };
-    match daemon_request(&req) {
-        Some(Response::Model { json }) => load_model_from_json(&json).map_err(|e| e.to_string()),
-        Some(Response::Err { message }) => Err(message),
-        Some(_) => Err("unexpected response from daemon".to_string()),
-        None => Err("daemon not available".to_string()),
-    }
-}
-
-/// Send a "start" notification via faceauth-notify; returns the notification ID.
-fn notify_start(uid: u32) -> Option<u32> {
-    let mut child =
-        process::Command::new(concat!(env!("FACEAUTH_LIBEXEC_DIR"), "/faceauth-notify"))
-            .args(["start", &uid.to_string(), "faceauth"])
-            .stdout(process::Stdio::piped())
-            .stderr(process::Stdio::null())
-            .spawn()
-            .ok()?;
-    let mut line = String::new();
-    BufReader::new(child.stdout.take()?)
-        .read_line(&mut line)
-        .ok()?;
-    child.wait().ok()?;
-    line.trim().parse().ok()
-}
-
-/// Send a result notification via faceauth-notify; fire-and-forget.
-fn notify_result(uid: u32, notif_id: u32, success: bool) {
-    let sub = if success { "success" } else { "failure" };
-    let mut cmd = process::Command::new(concat!(env!("FACEAUTH_LIBEXEC_DIR"), "/faceauth-notify"));
-    cmd.args([sub, &uid.to_string(), &notif_id.to_string(), "faceauth"])
-        .stdout(process::Stdio::null())
-        .stderr(process::Stdio::null());
-    let _ = cmd.spawn();
-}
-
-/// Exit with a message for the two error arms that are identical across every
-/// daemon `match`: unexpected response type and daemon not available.
-fn unexpected_or_unavailable(resp: Option<Response>) -> ! {
-    match resp {
-        None => eprintln!("faceauth: daemon not available"),
-        _ => eprintln!("faceauth: {}", gettext("unexpected response from daemon")),
-    }
+/// Print `faceauth: <msg>` to stderr and exit 1.
+fn die(msg: impl AsRef<str>) -> ! {
+    eprintln!("faceauth: {}", msg.as_ref());
     process::exit(1);
+}
+
+fn connect() -> Client {
+    Client::from_env(METHOD_TIMEOUT).unwrap_or_else(|e| die(e.message()))
+}
+
+/// Unwrap a daemon result or exit with its message.
+fn ok<T>(result: Result<T, Error>) -> T {
+    result.unwrap_or_else(|e| die(e.message()))
+}
+
+fn suitability_label(s: u8) -> String {
+    match s {
+        SUITABILITY_IR => format!(" [{}]", gettext("IR, recommended")),
+        SUITABILITY_POSSIBLE_IR => format!(" [{}]", gettext("possible IR")),
+        _ => String::new(),
+    }
+}
+
+fn print_cameras(cameras: &[CameraTuple], mark: Option<u32>) {
+    for (index, name, suit) in cameras {
+        let marker = if Some(*index) == mark { "*" } else { " " };
+        let name = if name.is_empty() {
+            gettext("(unknown)")
+        } else {
+            name.clone()
+        };
+        println!(
+            "{marker} /dev/video{index}  {name}{}",
+            suitability_label(*suit)
+        );
+    }
+}
+
+fn stdin_is_tty() -> bool {
+    // SAFETY: trivial libc query.
+    unsafe { libc::isatty(libc::STDIN_FILENO) != 0 }
+}
+
+/// Ask a yes/no question on the terminal; false on EOF or non-terminal.
+fn confirm(question: &str) -> bool {
+    if !stdin_is_tty() {
+        return false;
+    }
+    eprint!("{question} [y/N] ");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line).is_ok() && matches!(line.trim(), "y" | "Y" | "yes")
+}
+
+/// Resolve a `--camera` argument to a device index.
+fn parse_camera(spec: &str) -> u32 {
+    if let Ok(n) = spec.parse::<u32>() {
+        return n;
+    }
+    let resolved = if spec.starts_with('/') {
+        std::fs::canonicalize(spec)
+            .ok()
+            .and_then(|p| p.file_name()?.to_str()?.strip_prefix("video")?.parse().ok())
+    } else {
+        v4l::resolve_camera(spec)
+    };
+    resolved.unwrap_or_else(|| die(gettext("unrecognised camera '{spec}'").replace("{spec}", spec)))
+}
+
+/// Interactively choose a camera, defaulting to the most IR-like one.
+fn prompt_camera(cameras: &[CameraTuple]) -> u32 {
+    let default = preferred_camera(cameras)
+        .map(|i| cameras[i].0)
+        .unwrap_or_else(|| die(gettext("no camera devices found")));
+    if !stdin_is_tty() {
+        print_cameras(cameras, None);
+        die(gettext("--camera is required in non-interactive mode"));
+    }
+    println!("{}", gettext("Available cameras:"));
+    print_cameras(cameras, Some(default));
+    eprint!(
+        "{}",
+        gettext("Select camera (default {index}): ").replace("{index}", &default.to_string())
+    );
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    let _ = std::io::stdin().lock().read_line(&mut line);
+    match line.trim() {
+        "" => default,
+        s => s
+            .parse()
+            .ok()
+            .filter(|n| cameras.iter().any(|c| c.0 == *n))
+            .unwrap_or_else(|| die(gettext("invalid selection '{input}'").replace("{input}", s))),
+    }
+}
+
+fn cmd_add(client: &Client, user: &str, camera: Option<String>) {
+    // Only root may read another account's model; an administrator adding
+    // a batch for someone else chooses the camera (the daemon refuses a
+    // camera other than the enrolled one).
+    let enrolled = match client.get_model(user) {
+        Ok(m) => Some(m),
+        Err(Error::NoModel(_) | Error::PermissionDenied(_)) => None,
+        Err(e) => die(e.message()),
+    };
+    let index: i32 = match (camera, &enrolled) {
+        (None, Some(_)) => ENROLLED_CAMERA,
+        (Some(spec), _) => parse_camera(&spec) as i32,
+        (None, None) => prompt_camera(&ok(client.list_cameras())) as i32,
+    };
+    if index >= 0 && !v4l::is_greyscale_only(index as u32) {
+        eprintln!(
+            "faceauth: {}",
+            gettext("warning: this is not an IR camera; a photo of you may be able to unlock it")
+        );
+    }
+
+    eprintln!(
+        "faceauth: {}",
+        gettext("enrolling face for '{user}'; look at the camera and vary your angle")
+            .replace("{user}", user)
+    );
+    let _agent = agent::start();
+    let result = client.enroll(user, index, |done, total, status| {
+        let msg = if status == STATUS_TOO_SIMILAR {
+            gettext("[{done}/{total}] too similar to a previous capture; turn your head slightly")
+        } else {
+            gettext("[{done}/{total}] captured")
+        };
+        eprintln!(
+            "  {}",
+            msg.replace("{done}", &done.to_string())
+                .replace("{total}", &total.to_string())
+        );
+    });
+    ok(result);
+    println!(
+        "faceauth: {}",
+        gettext("Enrollment successful for '{user}'.").replace("{user}", user)
+    );
+}
+
+fn cmd_test(client: &Client, user: &str, timeout: Option<u32>) {
+    let camera = ok(client.check_authentication(user, ""));
+    eprintln!(
+        "faceauth: {}",
+        gettext("look at the camera ({camera}) ...").replace("{camera}", &camera)
+    );
+    match client.authenticate(user, "", timeout.unwrap_or(0)) {
+        Ok(()) => println!("faceauth: {}", gettext("authentication successful")),
+        Err(e) => die(gettext("authentication failed: {error}").replace("{error}", &e.message())),
+    }
+}
+
+fn cmd_clear(client: &Client, user: &str, batch: Option<u32>, yes: bool) {
+    let question = match batch {
+        Some(b) => gettext("Delete enrollment batch {batch} of '{user}'?")
+            .replace("{batch}", &b.to_string()),
+        None => gettext("Delete all face data of '{user}'?"),
+    }
+    .replace("{user}", user);
+    if !yes && !confirm(&question) {
+        die(gettext("not confirmed; use --yes to skip the question"));
+    }
+    let _agent = agent::start();
+    ok(match batch {
+        Some(b) => client.delete_batch(user, b),
+        None => client.delete_model(user),
+    });
+    println!(
+        "faceauth: {}",
+        gettext("Face data of '{user}' removed.").replace("{user}", user)
+    );
+}
+
+fn cmd_info(client: &Client, user: &str, json: bool) {
+    let model = ok(client.get_model(user));
+    let uid = users::by_name(user).map(|u| u.uid);
+    if json {
+        println!(
+            "{}",
+            json!({"user": user, "uid": uid, "camera": model.camera_id, "camera_index": model.camera_index, "batches": model.batches})
+        );
+        return;
+    }
+    println!("{}: {user}", gettext("User"));
+    if let Some(uid) = uid {
+        println!("{}: {uid}", gettext("UID"));
+    }
+    let device = match model.camera_index {
+        Some(i) => format!("/dev/video{i}"),
+        None => gettext("not connected"),
+    };
+    println!("{}: {} ({device})", gettext("Camera"), model.camera_id);
+    println!("{}: {}", gettext("Batches"), model.batches);
+}
+
+fn cmd_cameras(client: &Client, json: bool) {
+    let cameras = ok(client.list_cameras());
+    if json {
+        let list: Vec<_> = cameras
+            .iter()
+            .map(|(i, n, s)| json!({"index": i, "name": n, "suitability": s}))
+            .collect();
+        println!("{}", serde_json::Value::Array(list));
+    } else if cameras.is_empty() {
+        die(gettext("no camera devices found"));
+    } else {
+        print_cameras(&cameras, None);
+    }
+}
+
+fn cmd_service(client: &Client, user: &str, action: ServiceAction) {
+    let (service, enabled) = match action {
+        ServiceAction::List { json } => {
+            let services = ok(client.get_services(user));
+            if json {
+                let list: Vec<_> = services
+                    .iter()
+                    .map(|(s, on)| json!({"service": s, "enabled": on}))
+                    .collect();
+                println!("{}", serde_json::Value::Array(list));
+            } else if services.is_empty() {
+                println!("{}", gettext("No services are enabled by the administrator (/etc/faceauth/faceauth.conf)."));
+            } else {
+                for (s, on) in &services {
+                    println!(
+                        "{} {s}",
+                        if *on {
+                            gettext("enabled ")
+                        } else {
+                            gettext("disabled")
+                        }
+                    );
+                }
+            }
+            return;
+        }
+        ServiceAction::Enable { service } => (service, true),
+        ServiceAction::Disable { service } => (service, false),
+    };
+    let _agent = agent::start();
+    ok(client.set_service_enabled(user, &service, enabled));
+    let msg = if enabled {
+        gettext("face authentication enabled for '{service}' (user '{user}').")
+    } else {
+        gettext("face authentication disabled for '{service}' (user '{user}').")
+    };
+    println!(
+        "faceauth: {}",
+        msg.replace("{service}", &service).replace("{user}", user)
+    );
+}
+
+fn cmd_doctor(user: &str, json: bool) {
+    let client = Client::from_env(Duration::from_secs(10));
+    let checks = doctor::run(client.as_ref(), user);
+    let failed = checks.iter().any(|c| c.status == doctor::Status::Fail);
+    if json {
+        println!("{}", serde_json::to_string(&checks).expect("serializable"));
+    } else {
+        for c in &checks {
+            let tag = match c.status {
+                doctor::Status::Ok => "ok  ",
+                doctor::Status::Warn => "WARN",
+                doctor::Status::Fail => "FAIL",
+            };
+            println!("[{tag}] {:<12} {}", c.name, c.detail);
+        }
+    }
+    if failed {
+        process::exit(1);
+    }
 }
 
 fn main() {
     gettextrs::setlocale(gettextrs::LocaleCategory::LcAll, "");
-    gettextrs::bindtextdomain("faceauth", "/usr/share/locale").expect("failed to bind text domain");
-    gettextrs::textdomain("faceauth").expect("failed to set text domain");
+    let _ = gettextrs::bindtextdomain("faceauth", faceauth_common::LOCALE_DIR);
+    let _ = gettextrs::textdomain("faceauth");
 
     let cli = Cli::parse();
-    let username = match cli.user {
-        Some(u) => u,
-        None => {
-            let uid = unsafe { libc::getuid() };
-            match username_for_uid(uid) {
-                Some(u) => u,
-                None => {
-                    eprintln!(
-                        "faceauth: {}",
-                        gettext("cannot determine username for current UID")
-                    );
-                    process::exit(1);
-                }
-            }
-        }
-    };
+    let user = cli.user.unwrap_or_else(|| {
+        users::by_uid(users::current_uid())
+            .map(|u| u.name)
+            .unwrap_or_else(|| die(gettext("cannot determine username for current UID")))
+    });
 
     match cli.command {
-        Commands::Add { timeout, camera } => {
-            if let Err(e) = verify_password(&username) {
-                eprintln!("faceauth: {e}");
-                process::exit(1);
-            }
-
-            const COUNT: u32 = 5;
-
-            // If a model already exists, its stored camera is authoritative.
-            // A --camera argument is validated against it; if absent, the stored
-            // camera is used directly (no interactive prompt on subsequent adds).
-            let camera_index = match load_model(&username) {
-                Ok(existing) => {
-                    let stored_index = faceauth_core::resolve_camera_to_index(&existing.camera);
-                    if let Some(cam_arg) = camera {
-                        let given = camera::resolve_add_camera(Some(cam_arg));
-                        if given != stored_index {
-                            eprintln!(
-                                "faceauth: {}",
-                                gettext("'{user}' is already enrolled with {camera}; omit --camera to add another batch, or run 'faceauth clear' first to change cameras")
-                                    .replace("{user}", &username)
-                                    .replace("{camera}", &existing.camera)
-                            );
-                            process::exit(1);
-                        }
-                    }
-                    stored_index
-                }
-                Err(ref e) if is_model_not_found(e) => camera::resolve_add_camera(camera),
-                Err(e) => {
-                    eprintln!("faceauth: {}", e);
-                    process::exit(1);
-                }
-            };
-
-            let camera_name = camera_name_for_index(camera_index);
-            let camera_display = if camera_name.is_empty() {
-                faceauth_core::camera_id_for_index(camera_index)
-            } else {
-                camera_name
-            };
-            eprintln!(
-                "faceauth: {}",
-                gettext("enrolling face for '{user}'").replace("{user}", &username)
-            );
-            eprintln!(
-                "faceauth: {}",
-                gettext("'{user}' please look at the camera ({camera}) ...")
-                    .replace("{user}", &username)
-                    .replace("{camera}", &camera_display)
-            );
-
-            // Encodings captured so far this session, used to reject poses
-            // that are too similar to one already captured (distance < 0.3).
-            let mut captured: Vec<[f32; 128]> = Vec::new();
-            let mut i = 0u32;
-
-            // status(msg) overwrites the current line; status_done() commits it
-            // with a newline so it stays visible. We write to stderr directly to
-            // avoid buffering delays.
-            let stderr = std::io::stderr();
-            let status = |msg: &str| {
-                let mut h = stderr.lock();
-                // Overwrite the current line and pad to 72 chars to erase leftovers.
-                let _ = write!(h, "\r  {:<72}", msg);
-                let _ = h.flush();
-            };
-            let status_done = |msg: &str| {
-                let mut h = stderr.lock();
-                let _ = writeln!(h, "\rfaceauth: {:<72}", msg);
-            };
-
-            while i < COUNT {
-                if COUNT == 1 {
-                    status(&gettext("look directly at the camera..."));
-                } else {
-                    let hint = if i == 0 {
-                        String::new()
-                    } else {
-                        format!(" ({})", gettext("different angle"))
-                    };
-                    status(
-                        &gettext("[{done}/{total}] capturing...{hint}")
-                            .replace("{done}", &(i + 1).to_string())
-                            .replace("{total}", &COUNT.to_string())
-                            .replace("{hint}", &hint),
-                    );
-                }
-
-                let encoding: [f32; 128] = {
-                    let req = Request::CaptureEncoding {
-                        camera_index,
-                        timeout_secs: timeout,
-                    };
-                    match daemon_request(&req) {
-                        Some(Response::Encoding { data }) => match data.try_into() {
-                            Ok(arr) => arr,
-                            Err(_) => {
-                                status_done(&gettext(
-                                    "capture failed: invalid encoding from daemon",
-                                ));
-                                process::exit(1);
-                            }
-                        },
-                        Some(Response::Err { message }) => {
-                            status_done(
-                                &gettext("capture failed: {error}").replace("{error}", &message),
-                            );
-                            process::exit(1);
-                        }
-                        Some(_) => {
-                            status_done(&gettext(
-                                "capture failed: unexpected response from daemon",
-                            ));
-                            process::exit(1);
-                        }
-                        None => {
-                            status_done("daemon not available; cannot capture without daemon");
-                            process::exit(1);
-                        }
-                    }
-                };
-
-                // Reject if too similar to any encoding already captured this session.
-                if COUNT > 1 {
-                    if let Some(min_dist) = captured
-                        .iter()
-                        .map(|prev| encoding_distance(prev, &encoding))
-                        .reduce(f64::min)
-                    {
-                        if min_dist < 0.3 {
-                            status(&gettext(
-                                "[{done}/{total}] too similar ({dist}) - adjust angle and hold still"
-                            )
-                            .replace("{done}", &(i + 1).to_string())
-                            .replace("{total}", &COUNT.to_string())
-                            .replace("{dist}", &format!("{:.2}", min_dist)));
-                            continue;
-                        }
-                    }
-                }
-
-                captured.push(encoding);
-                i += 1;
-                let captured_msg = gettext("[{done}/{total}] captured")
-                    .replace("{done}", &i.to_string())
-                    .replace("{total}", &COUNT.to_string());
-                // Only commit the line permanently on the last encoding.
-                if i == COUNT {
-                    status_done(&captured_msg);
-                } else {
-                    status(&captured_msg);
-                }
-            }
-
-            // Enroll the entire batch in one request.
-            let req = Request::Enroll {
-                username: username.clone(),
-                camera_index,
-                encodings: captured.iter().map(|enc| enc.to_vec()).collect(),
-            };
-            match daemon_request(&req) {
-                Some(Response::Ok) => {}
-                Some(Response::Err { message }) => {
-                    eprintln!(
-                        "faceauth: {}",
-                        gettext("enrollment failed: {error}").replace("{error}", &message)
-                    );
-                    process::exit(1);
-                }
-                resp => unexpected_or_unavailable(resp),
-            }
-
-            println!(
-                "faceauth: {}",
-                gettext("Enrollment successful for '{user}'.").replace("{user}", &username)
-            );
-        }
-
-        Commands::Test { timeout } => {
-            // Load model via daemon to get camera info for the user-facing message.
-            // Authentication also requires the daemon, so if it is unavailable we
-            // fail immediately rather than falling back to a direct disk read (which
-            // would produce a misleading "Permission denied" error).
-            let face_model = match daemon_request(&Request::LoadModel {
-                username: username.clone(),
-            }) {
-                Some(Response::Model { json }) => match load_model_from_json(&json) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        eprintln!("faceauth: {}", e);
-                        process::exit(1);
-                    }
-                },
-                Some(Response::Err { message }) => {
-                    eprintln!("faceauth: {}", message);
-                    process::exit(1);
-                }
-                resp => unexpected_or_unavailable(resp),
-            };
-
-            let camera_index = faceauth_core::resolve_camera_to_index(&face_model.camera);
-            let camera_name = camera_name_for_index(camera_index);
-            let camera_display = if camera_name.is_empty() { face_model.camera.clone() } else { camera_name };
-            eprintln!(
-                "faceauth: {}",
-                gettext("'{user}' please look at the camera ({camera}) ...")
-                    .replace("{user}", &username)
-                    .replace("{camera}", &camera_display)
-            );
-
-            let uid = unsafe { libc::getuid() };
-            let notif_id = notify_start(uid);
-
-            let req = Request::Authenticate {
-                username: username.clone(),
-                timeout_secs: timeout,
-            };
-
-            match daemon_request(&req) {
-                Some(Response::Ok) => {
-                    if let Some(id) = notif_id {
-                        notify_result(uid, id, true);
-                    }
-                    println!("faceauth: {}", gettext("authentication successful"));
-                    process::exit(0);
-                }
-                Some(Response::Err { message }) => {
-                    if let Some(id) = notif_id {
-                        notify_result(uid, id, false);
-                    }
-                    eprintln!(
-                        "faceauth: {}",
-                        gettext("authentication failed: {error}")
-                            .replace("{error}", &message)
-                    );
-                    process::exit(1);
-                }
-                resp => unexpected_or_unavailable(resp),
-            }
-        }
-
-        Commands::Clear { index } => {
-            if let Err(e) = verify_password(&username) {
-                eprintln!("faceauth: {e}");
-                process::exit(1);
-            }
-            let req = Request::Clear {
-                username: username.clone(),
-                index,
-            };
-
-            match daemon_request(&req) {
-                Some(Response::Ok) => {
-                    println!(
-                        "faceauth: {}",
-                        gettext("Model for '{user}' removed.").replace("{user}", &username)
-                    );
-                }
-                Some(Response::Err { message }) => {
-                    eprintln!(
-                        "faceauth: {}",
-                        gettext("clear failed: {error}").replace("{error}", &message)
-                    );
-                    process::exit(1);
-                }
-                resp => unexpected_or_unavailable(resp),
-            }
-        }
-
-        Commands::Info => {
-            let model = match load_model(&username) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("faceauth: {}", e);
-                    process::exit(1);
-                }
-            };
-
-            println!("{}: {}", gettext("User"), username);
-            if let Some(uid) = faceauth_core::uid_for_username(&username) {
-                println!("{}: {}", gettext("UID"), uid);
-            }
-            println!("{}: {}", gettext("Camera"), model.camera);
-            println!("{}: {}", gettext("Batches"), model.encodings.len());
-        }
-
-        Commands::Cameras => {
-            let cameras = camera::print_camera_list();
-            if cameras.is_empty() {
-                eprintln!("faceauth: {}", gettext("no camera devices found"));
-                process::exit(1);
-            }
-        }
-
-        Commands::Ignore { requestor } => {
-            if let Err(e) = verify_password(&username) {
-                eprintln!("faceauth: {e}");
-                process::exit(1);
-            }
-            let req = Request::SetOpt {
-                username: username.clone(),
-                service: requestor.clone(),
-                allowed: false,
-            };
-            match daemon_request(&req) {
-                Some(Response::Ok) => {
-                    println!(
-                        "faceauth: {}",
-                        gettext("face authentication disabled for '{requestor}' (user '{user}').")
-                            .replace("{requestor}", &requestor)
-                            .replace("{user}", &username)
-                    );
-                }
-                Some(Response::Err { message }) => {
-                    eprintln!("faceauth: {}", message);
-                    process::exit(1);
-                }
-                resp => unexpected_or_unavailable(resp),
-            }
-        }
-
-        Commands::Unignore { requestor } => {
-            if let Err(e) = verify_password(&username) {
-                eprintln!("faceauth: {e}");
-                process::exit(1);
-            }
-            let req = Request::SetOpt {
-                username: username.clone(),
-                service: requestor.clone(),
-                allowed: true,
-            };
-            match daemon_request(&req) {
-                Some(Response::Ok) => {
-                    println!(
-                        "faceauth: {}",
-                        gettext("face authentication enabled for '{requestor}' (user '{user}').")
-                            .replace("{requestor}", &requestor)
-                            .replace("{user}", &username)
-                    );
-                }
-                Some(Response::Err { message }) => {
-                    eprintln!("faceauth: {}", message);
-                    process::exit(1);
-                }
-                resp => unexpected_or_unavailable(resp),
-            }
-        }
-
-        Commands::Services => {
-            let req = Request::GetServices { username: username.clone() };
-            match daemon_request(&req) {
-                Some(Response::Services { services }) => {
-                    if services.is_empty() {
-                        println!("faceauth: {}", gettext("no services recorded yet"));
-                    } else {
-                        for entry in &services {
-                            let prefix = if entry.allowed { '+' } else { '-' };
-                            println!("{}{}", prefix, entry.name);
-                        }
-                    }
-                }
-                Some(Response::Err { message }) => {
-                    eprintln!("faceauth: {}", message);
-                    process::exit(1);
-                }
-                resp => unexpected_or_unavailable(resp),
-            }
-        }
+        Commands::Doctor { json } => cmd_doctor(&user, json),
+        Commands::Add { camera } => cmd_add(&connect(), &user, camera),
+        Commands::Test { timeout } => cmd_test(&connect(), &user, timeout),
+        Commands::Clear { batch, yes } => cmd_clear(&connect(), &user, batch, yes),
+        Commands::Info { json } => cmd_info(&connect(), &user, json),
+        Commands::Cameras { json } => cmd_cameras(&connect(), json),
+        Commands::Service { action } => cmd_service(&connect(), &user, action),
     }
 }

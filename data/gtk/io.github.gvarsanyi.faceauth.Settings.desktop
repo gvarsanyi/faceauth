@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Face Authentication
+Name[de]=Gesichtsauthentifizierung
+Comment=Enroll your face and choose where face authentication is used
+Comment[de]=Gesicht registrieren und festlegen, wo die Gesichtsauthentifizierung verwendet wird
+Exec=faceauth-settings
+Icon=faceauth
+Terminal=false
+Categories=GTK;Settings;Security;
+Keywords=face;camera;login;sudo;biometric;
+# KDE Plasma has the System Settings module and faceauth-gui.
+NotShowIn=KDE;
+StartupNotify=true

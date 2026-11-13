@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -5,8 +6,9 @@
 #include <QUrl>
 
 #include <KAboutData>
+#include <kcoreaddons_version.h>
+#include <KLocalizedQmlContext>
 #include <KLocalizedString>
-#include <KLocalizedContext>
 
 #include "FaceAuthBackend.h"
 
@@ -17,19 +19,23 @@ int main(int argc, char *argv[])
     KAboutData about(
         QStringLiteral("faceauth-gui"),
         i18n("Face Authentication"),
-        QStringLiteral("0.8.0"),
-        i18n("Manage face authentication enrollment and settings"),
-        KAboutLicense::GPL_V2,
-        i18n("© faceauth contributors")
+        QStringLiteral(FACEAUTH_VERSION),
+        i18n("Enroll your face and choose where face authentication is used"),
+        KAboutLicense::MIT,
+        i18n("Copyright (C) Greg Varsanyi")
     );
+#if KCOREADDONS_VERSION >= QT_VERSION_CHECK(6, 9, 0)
+    about.addLicense(KAboutLicense::Apache_V2);
+#endif
+    about.setHomepage(QStringLiteral("https://github.com/gvarsanyi/faceauth"));
+    about.setDesktopFileName(QStringLiteral("io.github.gvarsanyi.faceauth"));
     KAboutData::setApplicationData(about);
-    KLocalizedString::setApplicationDomain("kcm_faceauth");
 
     // Register FaceAuthBackend as a QML singleton under the org.faceauth.kcm
     // module. The engine takes ownership of the returned object.
     // We use qmlRegisterSingletonType (not QML_SINGLETON) so that the KCM
     // plugin can still create its own FaceAuthBackend as a child QObject of
-    // FaceAuthKcm — the two modes never coexist in the same process.
+    // FaceAuthKcm: the two modes never coexist in the same process.
     qmlRegisterSingletonType<FaceAuthBackend>(
         "org.faceauth.kcm", 1, 0, "Backend",
         [](QQmlEngine *, QJSEngine *) -> QObject * {
@@ -42,7 +48,7 @@ int main(int argc, char *argv[])
         QQuickStyle::setStyle(QStringLiteral("org.kde.desktop"));
 
     QQmlApplicationEngine engine;
-    engine.rootContext()->setContextObject(new KLocalizedContext(&engine));
+    KLocalization::setupLocalizedContext(&engine);
 
     const QUrl url(QStringLiteral("qrc:/org/faceauth/kcm/ui/standalone.qml"));
     QObject::connect(

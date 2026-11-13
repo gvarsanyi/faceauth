@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+  "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!-- Checked by faceauth-daemon for state-changing requests. The owner
+     annotation lets the unprivileged daemon user (faceauthd) query polkit
+     about its callers (polkit 121 and newer). -->
+<policyconfig>
+  <vendor>faceauth</vendor>
+  <vendor_url>https://github.com/gvarsanyi/faceauth</vendor_url>
+  <icon_name>faceauth</icon_name>
+
+  <action id="io.github.gvarsanyi.faceauth.manage-own">
+    <description>Manage your face authentication data</description>
+    <message>Authentication is required to change your face authentication data.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_self_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.owner">unix-user:faceauthd</annotate>
+  </action>
+
+  <action id="io.github.gvarsanyi.faceauth.manage-other">
+    <description>Manage another user's face authentication data</description>
+    <message>Authentication is required to change another user's face authentication data.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.owner">unix-user:faceauthd</annotate>
+  </action>
+</policyconfig>

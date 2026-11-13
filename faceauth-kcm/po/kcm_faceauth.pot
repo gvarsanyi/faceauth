@@ -1,0 +1,167 @@
+# faceauth - KDE System Settings module and faceauth-gui
+# Copyright (C) Greg Varsanyi
+# This file is distributed under the same license as the faceauth package.
+#
+# Regenerate with: make pot
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: faceauth 0.10.0\n"
+"Report-Msgid-Bugs-To: https://github.com/gvarsanyi/faceauth/issues\n"
+"POT-Creation-Date: 2026-11-12 22:28-0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=CHARSET\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: faceauth-kcm/src/main.cpp:21
+msgid "Face Authentication"
+msgstr ""
+
+#: faceauth-kcm/src/main.cpp:23
+msgid "Enroll your face and choose where face authentication is used"
+msgstr ""
+
+#: faceauth-kcm/src/main.cpp:25
+msgid "Copyright (C) Greg Varsanyi"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:89
+msgid "The face authentication service (faceauth-daemon) is not available"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:92
+msgid "Retry"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:111 faceauth-kcm/src/ui/main.qml:308
+#: faceauth-kcm/src/ui/main.qml:363
+msgid "Close"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:124
+msgid "Status"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:128
+msgid "Service:"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:129
+msgid "Available"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:129
+msgid "Available, no face model data"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:134 faceauth-kcm/src/ui/main.qml:275
+msgid "Test Face Authentication"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:153
+msgid "Enrollment"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:159
+msgid "Camera:"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:188
+msgid "Enrolled camera not connected"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:194
+msgid "Face Model Data:"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:198
+msgid "Add More"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:198
+msgid "Add"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:209
+msgid "Delete All"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:220
+msgid "Services"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:224
+msgid "Never used for:"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:225
+msgid "Remote sessions (SSH, remote desktop), including sudo inside them"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:230
+msgid "Background processes and sessions that are not in the foreground"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:235
+msgid "Use for:"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:241
+msgid "(no services enabled by the administrator)"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:249
+msgid ""
+"The administrator chooses the available services in /etc/faceauth/"
+"faceauth.conf."
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:288
+msgid "Authentication failed: %1"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:295 faceauth-kcm/src/ui/main.qml:342
+msgid "Look at the camera..."
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:295
+msgid "Authentication successful!"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:295
+msgid "Failed"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:319
+msgid "Enroll Face"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:339
+msgid "Enrollment failed: %1"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:341
+msgid "Enrollment complete!"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:350
+msgid "Vary your angle slightly between each capture."
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:363
+msgid "Cancel"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:373
+msgid "Clear Face Data?"
+msgstr ""
+
+#: faceauth-kcm/src/ui/main.qml:374
+msgid ""
+"All enrolled face data will be permanently removed. You will need to enroll "
+"again to use face authentication."
+msgstr ""

@@ -2,16 +2,18 @@
 name = "faceauth-cli"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Command-line tool for faceauth face authentication"
 
 [[bin]]
 name = "faceauth"
 path = "src/main.rs"
 
 [dependencies]
-faceauth-core = { path = "../faceauth-core" }
+faceauth-common = { workspace = true }
 clap = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
-libc = "0.2"
+libc = { workspace = true }
 gettext-rs = { workspace = true }
-pam = "0.7"
-rpassword = "7"

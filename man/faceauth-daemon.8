@@ -1,0 +1,67 @@
+.TH FACEAUTH-DAEMON 8 "2026-11" "faceauth 0.10.0" "System Administration"
+.SH NAME
+faceauth-daemon \- face authentication service
+.SH SYNOPSIS
+.B /usr/libexec/faceauth-daemon
+.RB [ \-\-session\-bus " " \-\-state\-dir
+.IR dir ]
+.SH DESCRIPTION
+.B faceauth-daemon
+owns the camera and the enrolled face data and provides the
+.B io.github.gvarsanyi.FaceAuth1
+service on the system bus. It is started on demand by D-Bus activation
+through
+.BR faceauth-daemon.service ,
+runs as the unprivileged
+.B faceauthd
+user, and is the only process that opens cameras for face authentication.
+.PP
+Authorization: root may call every method. Other callers may read and test
+only their own account; testing additionally requires that the caller be in
+a local, foreground seat session (checked with systemd-logind). Enrolling,
+deleting, and changing service settings require the polkit actions
+.B io.github.gvarsanyi.faceauth.manage-own
+or
+.BR io.github.gvarsanyi.faceauth.manage-other .
+.PP
+Virtual cameras (v4l2loopback, akvcam, vivid) are never used because other
+processes can inject frames into them.
+.PP
+The face models are loaded on first use and unloaded after five idle
+minutes. Callers that retry immediately after a failure (the KDE lock
+screen does) are slowed down: after two such retries for the same user and
+service, each further retry first waits 5, 10, then at most 20 seconds with
+the camera off. A success, or a pause of three seconds before the next attempt,
+resets this.
+.PP
+While the user's graphical session is locked (logind
+.BR LockedHint ,
+set by KDE Plasma and GNOME), a match counts only after the camera has seen
+no face for two seconds since the lock, so locking the screen while seated
+does not unlock it again immediately. Session agents
+.RB ( faceauth-agent ,
+one per graphical session) register with the daemon and receive a unicast
+signal whenever their user's face is checked, to show a notification.
+.SH OPTIONS
+.TP
+.B \-\-session\-bus
+Serve on the session bus as the current user, without polkit. For
+development and testing only.
+.TP
+.BI \-\-state\-dir " dir"
+State directory; only with
+.BR \-\-session\-bus .
+.SH FILES
+.TP
+.I /var/lib/faceauth/<uid>.enc.json
+Enrolled camera and face encodings (mode 0600).
+.TP
+.I /var/lib/faceauth/<uid>.optout
+Services the user disabled.
+.TP
+.I /etc/faceauth/faceauth.conf
+Configuration; read on every request.
+.SH SEE ALSO
+.BR faceauth (1),
+.BR faceauth.conf (5),
+.BR pam_faceauth (8)

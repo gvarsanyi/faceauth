@@ -1,0 +1,110 @@
+<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+  "https://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+<!--
+  io.github.gvarsanyi.FaceAuth1.Manager
+  Object: /io/github/gvarsanyi/FaceAuth1 on the system bus.
+
+  Errors use the prefix io.github.gvarsanyi.FaceAuth1.Error.: PermissionDenied,
+  NotAuthorized, NoModel, ServiceNotAllowed, NotLocalSession, NoMatch, Camera,
+  InvalidArgs, Busy, Cancelled, Failed.
+
+  Authorization: root may call everything. Otherwise:
+  - GetModel, GetServices, CheckAuthentication: own account only.
+  - Enroll, DeleteModel, DeleteBatch, SetServiceEnabled: polkit action
+    io.github.gvarsanyi.faceauth.manage-own (own account) or
+    io.github.gvarsanyi.faceauth.manage-other. Set the
+    ALLOW_INTERACTIVE_AUTHORIZATION message flag to let polkit prompt.
+  - Authenticate: own account, from a local, active seat session.
+  - ListCameras: anyone. RegisterAgent: any caller, for its own UID (at
+    most 8 agents per user).
+
+  Authenticate and CheckAuthentication: graphical login-screen services
+  (gdm-password, gdm-autologin, sddm, lightdm, cosmic-greeter) return
+  ServiceNotAllowed unless the user's session is locked. Authenticate may
+  first wait up to 20 s (back-off for immediate retries), and on a locked
+  session counts a match only after the camera has seen no face for 2 s
+  since the lock.
+-->
+<node>
+  <interface name="io.github.gvarsanyi.FaceAuth1.Manager">
+    <property name="Version" type="s" access="read"/>
+
+    <!-- Usable cameras: (index, name, suitability 0=colour 1=possible IR 2=IR). -->
+    <method name="ListCameras">
+      <arg name="cameras" type="a(usy)" direction="out"/>
+    </method>
+
+    <!-- camera_index is -1 if the enrolled camera is not connected. -->
+    <method name="GetModel">
+      <arg name="username" type="s" direction="in"/>
+      <arg name="camera_id" type="s" direction="out"/>
+      <arg name="camera_index" type="i" direction="out"/>
+      <arg name="batches" type="u" direction="out"/>
+    </method>
+
+    <!-- Capture and store a batch. camera_index -1 reuses the model's camera.
+         Progress is sent to the caller only, via EnrollProgress. -->
+    <method name="Enroll">
+      <arg name="username" type="s" direction="in"/>
+      <arg name="camera_index" type="i" direction="in"/>
+    </method>
+    <method name="CancelEnroll"/>
+    <signal name="EnrollProgress">
+      <arg name="done" type="u"/>
+      <arg name="total" type="u"/>
+      <!-- "captured" or "too-similar" -->
+      <arg name="status" type="s"/>
+    </signal>
+
+    <method name="DeleteModel">
+      <arg name="username" type="s" direction="in"/>
+    </method>
+    <method name="DeleteBatch">
+      <arg name="username" type="s" direction="in"/>
+      <arg name="index" type="u" direction="in"/>
+    </method>
+
+    <!-- Admin-allowed services and whether each is enabled for the user. -->
+    <method name="GetServices">
+      <arg name="username" type="s" direction="in"/>
+      <arg name="services" type="a(sb)" direction="out"/>
+    </method>
+    <method name="SetServiceEnabled">
+      <arg name="username" type="s" direction="in"/>
+      <arg name="service" type="s" direction="in"/>
+      <arg name="enabled" type="b" direction="in"/>
+    </method>
+
+    <!-- Pre-flight check without opening the camera; returns the camera name.
+         service "" skips the service policy. -->
+    <method name="CheckAuthentication">
+      <arg name="username" type="s" direction="in"/>
+      <arg name="service" type="s" direction="in"/>
+      <arg name="camera" type="s" direction="out"/>
+    </method>
+
+    <!-- service "" = test mode (no service policy); timeout_secs 0 = default, max 30. -->
+    <method name="Authenticate">
+      <arg name="username" type="s" direction="in"/>
+      <arg name="service" type="s" direction="in"/>
+      <arg name="timeout_secs" type="u" direction="in"/>
+    </method>
+
+    <!-- Register the caller as a notification agent for its own user (at
+         most 8 per user). Until it disconnects it receives the two signals
+         below, unicast, for every Authenticate of that user. -->
+    <method name="RegisterAgent"/>
+    <!-- caller_pid: process that called Authenticate (0 if unknown);
+         service: PAM service, empty for tests. -->
+    <signal name="AuthenticationStarted">
+      <arg name="id" type="u"/>
+      <arg name="service" type="s"/>
+      <arg name="caller_pid" type="u"/>
+      <arg name="timeout_secs" type="u"/>
+    </signal>
+    <signal name="AuthenticationFinished">
+      <arg name="id" type="u"/>
+      <arg name="success" type="b"/>
+    </signal>
+  </interface>
+</node>

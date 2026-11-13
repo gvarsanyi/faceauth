@@ -1,257 +1,178 @@
 # faceauth
 
-https://github.com/gvarsanyi/faceauth
+Face authentication for Linux. A PAM module asks a small system daemon to
+match your face with a webcam, preferably an IR camera, so you can approve
+`sudo`, polkit prompts, and the KDE Plasma lock screen by looking at the
+camera. Anything other than a match falls through to your password.
 
-A facial recognition authentication system for Linux, written in Rust. Integrates with PAM (Pluggable Authentication Modules) to enable face-based login as a drop-in replacement or supplement to password authentication.
+> **Security note.** faceauth has no liveness detection. A colour webcam can
+> be fooled by a photo; an IR camera is much harder to fool but not
+> impossible. Treat face authentication as a convenience, keep a strong
+> password, and read [SECURITY.md](SECURITY.md).
 
 ## Features
 
-- Enroll one or more face encodings per user (supports multiple angles/lighting conditions)
-- Authenticate users by comparing live camera feed against stored face models
-- PAM module integration for system-level authentication
-- CLI for enrollment, testing, and management
-- Per-user controls: ignore specific PAM services/applications
-- Desktop notifications for authentication events (start, success, failure) via D-Bus
-- Secure model storage with atomic writes and strict file permissions
-- Fallback support: returns `AUTHINFO_UNAVAIL` on any non-match (no model enrolled, camera unavailable, timeout, etc.), allowing the PAM stack to fall through to password auth
-- Automatically skipped for SSH sessions (direct login and any subprocess within, e.g. `sudo`) and non-interactive processes (no controlling terminal, no display variables in environment, and no active login session for the user); face auth only runs in interactive local sessions
+- Daemon-centred design: only `faceauth-daemon` (unprivileged `faceauthd`
+  user, sandboxed by systemd) touches the camera and the face data.
+- D-Bus API (`io.github.gvarsanyi.FaceAuth1`) with polkit authorization for
+  every change and logind checks for every camera use.
+- Never used for remote sessions (SSH, remote desktop, including `sudo` inside
+  them), background jobs, or sessions that are not in the foreground.
+- Administrator decides which PAM services may use face authentication;
+  users can opt out per service.
+- Requires several consecutive frames with exactly one matching face;
+  virtual (frame-injectable) cameras are refused; IR can be made mandatory.
+- CLI (`faceauth`), KDE System Settings module and `faceauth-gui`, and a
+  GTK/libadwaita app (`faceauth-settings`) for GNOME, COSMIC, and others.
+- Desktop notifications while the camera is active, from a per-session
+  agent (`faceauth-agent`, XDG autostart).
 
-## Architecture
+## Components
 
-The project is a Cargo workspace with five Rust crates plus a C++/QML KDE component:
+| Component | Description |
+|---|---|
+| `faceauth-common` | D-Bus contract and client, logind checks, config, V4L2 enumeration (no vision code) |
+| `faceauth-core` | Face detection and matching (dlib), camera capture, model storage |
+| `faceauth-daemon` | System D-Bus service; owns camera and face data |
+| `faceauth-pam` | PAM module (`pam_faceauth.so`) |
+| `faceauth-cli` | `faceauth` command |
+| `faceauth-agent` | Per-session notification agent |
+| `faceauth-kcm` | KDE System Settings module and `faceauth-gui` (C++/QML) |
+| `faceauth-gtk` | `faceauth-settings`, GTK 4 / libadwaita app |
 
-| Component | Type | Description |
-|---|---|---|
-| `faceauth-core` | Rust library | Face detection, encoding, matching, and model persistence |
-| `faceauth-cli` | Rust binary | CLI for enrollment, testing, and management |
-| `faceauth-daemon` | Rust binary | Privileged daemon that owns camera access, runs authentication, and persists face models |
-| `faceauth-pam` | Rust cdylib | PAM module for system authentication |
-| `faceauth-notify` | Rust binary | Desktop notification helper spawned by the PAM module |
-| `faceauth-kcm` | C++/QML | KDE System Settings module and standalone GUI (`faceauth-gui`) for managing enrollment |
+## Building and installing
 
-## Requirements
-
-### System Dependencies
-
-See [`distro-build-deps.md`](distro-build-deps.md) for the full per-distro package list. In summary:
-
-- **Runtime**: [dlib](http://dlib.net/) with face recognition support, a V4L2-compatible webcam, Linux PAM
-- **Build (Rust components)**: dlib headers, V4L2 headers, libclang (for bindgen), PAM headers
-- **Build (KCM/GUI)**: cmake, KF6 (KCMUtils, CoreAddons, Kirigami, I18n), Qt6 (Quick, Network, QuickControls2)
-- **Build (icon generation)**: [ImageMagick](https://imagemagick.org/) (`magick` command), needed at `make` time to generate PNG/ICO variants from the SVG master
-
-### Pre-trained Models
-
-The two dlib model files are downloaded automatically during `cargo build`, no
-manual steps required:
-
-| File | Size | Source |
-|---|---|---|
-| `shape_predictor_5_face_landmarks.dat` | ~9.5 MB | [dlib.net](http://dlib.net/files/shape_predictor_5_face_landmarks.dat.bz2) |
-| `dlib_face_recognition_resnet_model_v1.dat` | ~21.4 MB | [dlib.net](http://dlib.net/files/dlib_face_recognition_resnet_model_v1.dat.bz2) |
-
-`build.rs` fetches and decompresses them into `faceauth-core/models/` on first
-build, then `include_bytes!` embeds them directly into the binary. At runtime
-the binary extracts them to `/tmp/faceauth-models-<version>/` on first use
-(since dlib requires a file path). A network connection is only needed the
-first time you build.
-
-The `.dat` files are listed in `.gitignore` and must not be committed.
-
-## Building and Installation
+Install the [build dependencies](distro-build-deps.md), then:
 
 ```bash
-make                # build all components (no root required)
-sudo make install   # install to system paths and start the daemon
+make                  # KCM=0 skips the KDE module; the GTK app is built if
+                      # its development files are installed (GTK=0/1 forces)
+make test
+sudo make install     # installs, creates faceauthd, enables the PAM module
+faceauth doctor       # verify the setup
+faceauth add          # enroll
 ```
 
-`make` builds the Rust workspace and the KCM. `sudo make install` then:
-- `target/release/faceauth` -> `/usr/bin/faceauth`
-- `target/release/faceauth-daemon` -> `/usr/libexec/faceauth-daemon`
-- `target/release/faceauth-notify` -> `/usr/libexec/faceauth-notify`
-- `target/release/libpam_faceauth.so` -> `/usr/lib64/security/pam_faceauth.so` (or `/usr/lib/security/` depending on distro)
-- KCM plugin -> KDE plugin directory; `faceauth-gui` -> `/usr/bin/faceauth-gui`
-- Creates the `faceauthd` system user (if not present)
-- Creates `/etc/security/faceauth/` with `750` permissions owned by `faceauthd`
-- Installs and starts the `faceauth-daemon` systemd service
-- Configures PAM and the KDE lockscreen (see [PAM Configuration](#pam-configuration))
+`make install DESTDIR=/path` only stages files (used for packaging).
+`make deb` / `make rpm` build packages with nfpm. `sudo make uninstall`
+disables the PAM module, deletes all enrolled face data, and removes the
+files.
 
-To uninstall: `sudo make uninstall`
+`make install` (and the packages) run `faceauth-setup configure`, which:
 
-> **Note:** The CLI is installed to `/usr/bin` rather than `/usr/local/bin` so it is available on sudo's restricted `PATH`.
+- creates the `faceauthd` account (sysusers.d);
+- enables the PAM module: on Debian/Ubuntu via `pam-auth-update`; elsewhere
+  it adds a marked `auth sufficient pam_faceauth.so` line to each service in
+  `services` (copying `/usr/lib/pam.d/<service>` to `/etc/pam.d` if needed).
+  Run `/usr/libexec/faceauth-setup configure` again after changing
+  `services` (not needed with `pam-auth-update`, where the daemon's
+  allow-list decides); `faceauth-setup unconfigure` removes the lines (and
+  unchanged copies);
+- creates `/etc/pam.d/kde-fingerprint` for hands-free KDE lock-screen unlock
+  if Plasma is installed and the slot is unused.
 
-### How privilege works
-
-The daemon runs as the `faceauthd` system user and is the only process with access to the camera at authentication time and write access to `/etc/security/faceauth/`. When a user runs `faceauth add` or `faceauth clear`, the CLI:
-
-1. Connects to `/run/faceauth/faceauth.sock`
-2. Requests a face capture from the daemon (`CaptureEncoding`), which opens the camera and returns the encoding
-3. Sends the encoding (or a clear request) to the daemon (`Enroll` / `Clear`)
-
-The daemon uses `SO_PEERCRED` to obtain the caller's UID from the kernel (this cannot be forged) and only allows a user to modify their own model. Root (UID 0) may manage any user's model.
-
-All CLI commands that modify state (`add`, `clear`) require the daemon and will exit with an error if it is unavailable.
+The daemon is D-Bus activated; there is nothing to enable.
 
 ## Usage
 
-```
-faceauth [--user USERNAME] COMMAND [OPTIONS]
-```
-
-The current user's account is used by default. Root may pass `--user USERNAME`
-(or `-u USERNAME`) to manage another user's model.
-
-### Enroll a face
-
 ```bash
-faceauth add
+faceauth cameras                # list cameras; IR cameras are marked
+faceauth add                    # enroll (prompts for the camera the first time)
+faceauth add --camera 2         # or choose it explicitly
+faceauth test                   # exit status 0 on a match
+faceauth info                   # enrolled camera and batches
+faceauth service list           # services allowed by the admin, and your choice
+faceauth service disable sudo   # stop using face auth for sudo
+faceauth clear                  # delete your face data
+faceauth doctor                 # diagnose the installation
 ```
 
-Position your face in front of the camera. The tool captures 5 encodings, prompting you to vary your angle between captures to improve recognition accuracy. Each capture waits up to 30 seconds for a single face to be detected.
+Changing data asks for your password through polkit. With `--user NAME`,
+root can read and change other accounts; an administrator can change them
+(polkit `manage-other`). Most commands
+accept `--json`. See `faceauth(1)`.
 
-### Test authentication
+## Configuration
 
-```bash
-faceauth test
+`/etc/faceauth/faceauth.conf` (see `faceauth.conf(5)`):
+
+```ini
+services = sudo, sudo-i, polkit-1, kde-fingerprint
+threshold = 0.45
+required_matches = 3
+timeout = 5
+require_ir = no
 ```
 
-Exits with code `0` on success, `1` on failure. Times out after 5 seconds by default. Prints the camera device being used before attempting authentication.
+A service must be listed here and its PAM stack must load
+`pam_faceauth.so`. Graphical login screens (`gdm-password`, `sddm`,
+`lightdm`, `cosmic-greeter`) only ever unlock an existing, locked session:
+logging in by face would leave the keyring, KWallet, and an encrypted home
+directory locked. On GNOME, adding `gdm-password` enables face unlock, at
+the cost of up to `timeout` seconds before the password prompt when the face
+is not recognized; it is not listed by default.
 
-### Remove a face model
+faceauth matches the account being authenticated. If `sudo` asks for the
+target's password (`Defaults targetpw`, the openSUSE default) or polkit
+treats only root as administrator, that account is root, and face
+authentication applies only if root is enrolled. On openSUSE,
+`sudo-policy-wheel-auth-self` makes `sudo` authenticate wheel members as
+themselves.
 
-```bash
-faceauth clear
-```
-
-### Inspect a face model
-
-```bash
-faceauth info
-```
-
-Prints the enrolled camera's stable udev identifiers and fallback index, and the number of stored encoding batches.
-
-### Ignore specific applications
-
-```bash
-faceauth ignore sudo          # never use face auth when sudo asks
-faceauth ignore kscreenlocker # skip for the lock screen
-faceauth unignore sudo        # re-enable face auth for sudo
-```
-
-Face auth is opt-in per PAM service. Each service is recorded as disabled (`-`) the first time it requests face auth. `faceauth ignore` forces a `-` entry in the user's opt file; `faceauth unignore` forces a `+` entry to explicitly enable it.
-
-### List cameras
-
-```bash
-faceauth cameras
-```
-
-Lists all detected V4L2 camera devices with their index, name, and a suitability hint (`[IR, recommended]` for greyscale-only devices, `[possible IR]` for devices whose name suggests IR).
-
-### Managing another user's model (root)
-
-```bash
-sudo faceauth --user alice add
-sudo faceauth --user alice clear
-sudo faceauth --user alice info
-sudo faceauth --user alice ignore sudo
-```
-
-### Options
-
-`add` accepts:
-- `--timeout SECONDS` (default 30): time to wait for a face to be detected per capture
-- `--camera INDEX`: select the V4L2 device; required when more than one camera is present (`cameras` shows available indices); the camera's stable udev identifiers (`/dev/v4l/by-id/`, `/dev/v4l/by-path/`) are stored in the model and used to reopen the correct device at authentication, even if the device index changes
-
-`test` accepts `--timeout SECONDS` (default 5).
-
-```bash
-# Show available cameras and pick the right index
-faceauth cameras
-
-# Enroll using /dev/video2 (e.g. an IR camera)
-faceauth add --camera 2
-
-# Test: camera is identified from the model automatically
-faceauth test
-```
-
-## PAM Configuration
-
-`sudo make install` configures PAM automatically on supported distros:
-
-| Distro | Mechanism |
-|---|---|
-| openSUSE / SLES | Installs `pam-config.d/pam_faceauth` to `/usr/lib/pam-config.d/`, runs `pam-config --add --faceauth` |
-| Debian / Ubuntu | Installs `pam-configs/faceauth` descriptor, runs `pam-auth-update --enable faceauth` |
-| Other | Prints manual instructions (see below) |
-
-On unsupported distros, add the following line to each PAM service file you want to protect (e.g. `/etc/pam.d/login`, `/etc/pam.d/sudo`) before the `pam_unix` line:
+PAM module options: `timeout=N` (see `pam_faceauth(8)`). Manual PAM setup:
 
 ```
 auth  sufficient  pam_faceauth.so
-auth  required    pam_unix.so
 ```
 
-The camera used during enrollment is stored in the model file, so no camera configuration is needed in the PAM config.
+before the password module in each service.
 
-A successful face match grants access immediately (`sufficient`). Any non-match result (no model enrolled, camera unavailable, timeout, or other error) returns `AUTHINFO_UNAVAIL` and PAM falls through to the next module.
+## How it works
 
-### KDE Plasma lockscreen
+1. **Enrollment.** `faceauth add` calls `Enroll`; after polkit authorization
+   the daemon opens the camera, collects five single-face encodings from
+   different angles (128-D dlib descriptors), and stores them in
+   `/var/lib/faceauth/<uid>.enc.json` (mode 0600) together with the camera's
+   stable udev identifier. Clients never supply encodings.
+2. **Authentication.** The PAM module checks the session locally, asks the
+   daemon whether the service is allowed and a model exists, and calls
+   `Authenticate`. The daemon tells the user's `faceauth-agent`, which shows
+   a notification. The daemon succeeds when
+   `required_matches` consecutive frames each contain exactly one face within
+   `threshold` of an enrolled encoding.
+3. **Models.** The dlib models (public domain) are committed under
+   `faceauth-core/models/`, verified by SHA-256 at build time, embedded in
+   the daemon, and loaded from memory.
 
-KDE Plasma's lockscreen (`kscreenlocker`) runs a second, non-interactive PAM service (`kde-fingerprint`) that runs in a background thread the moment the screen locks. Any module in that service that returns success unlocks the screen immediately, without the user interacting with the password dialog.
+## Desktop integration
 
-`sudo make install` installs `pam.d/kde-fingerprint` (from the repository) to `/etc/pam.d/kde-fingerprint` when KDE is detected (`/etc/pam.d/kde` exists) and no `kde-fingerprint` service is already configured. This gives a hands-free face unlock: the camera activates as soon as the screen locks, and if a face is recognised within the timeout the screen unlocks on its own.
+- **KDE Plasma:** System Settings, Security & Privacy, Face Authentication;
+  lock-screen unlock via `kde-fingerprint`.
+- **GNOME, COSMIC, others:** `faceauth-settings` (Face Authentication in the
+  application menu). PAM integration works wherever the service's stack
+  includes the module, for example `polkit-1` for the desktop's polkit
+  agent, including polkit's socket-activated helper.
 
-If `kde-fingerprint` already exists (e.g. `fprintd` is configured), the installer leaves it untouched; face auth still works through the main `kde` PAM service via the shared `common-auth` stack, it just requires the password dialog to be active first.
-
-## Desktop Notifications
-
-When face authentication is triggered (e.g. by `sudo` or a lock screen), the PAM module spawns `faceauth-notify` to send standard desktop notifications to the user's graphical session via D-Bus (`org.freedesktop.Notifications`).
-
-| Event | Summary |
-|---|---|
-| Authentication started | "Face Authentication ..." |
-| Authentication succeeded | "Face Authentication Successful" |
-| Authentication failed | "Face Authentication Failed" |
-
-The helper is spawned as the authenticated user (dropping privileges via `setuid`/`setgid`) so it can connect to the correct D-Bus session bus at `/run/user/<uid>/bus`. Notification errors are silently ignored; auth outcome is never affected.
-
-## Icon Set
-
-The application icon lives in `assets/icons/faceauth.svg`. PNG variants (16-512 px) and an `.ico` file are generated automatically at build time by `faceauth-notify/build.rs`, which runs `assets/icons/generate.sh` using ImageMagick's `magick` command.
-
-To regenerate manually:
+## Development
 
 ```bash
-cd assets/icons
-./generate.sh
+cargo build
+target/debug/faceauth-daemon --session-bus --state-dir /tmp/fa &
+FACEAUTH_BUS=session target/debug/faceauth doctor
 ```
 
-Generated files (`assets/icons/png/` and `assets/icons/*.ico`) are excluded from version control via `.gitignore`.
-
-## How It Works
-
-1. **Enrollment**: The CLI asks the daemon to capture a face encoding (`CaptureEncoding`). The daemon opens the camera, detects a face using dlib, computes a 128-dimensional encoding vector via a ResNet model, and returns it to the CLI. The CLI then sends the encoding to the daemon (`Enroll`), which verifies the caller's identity via `SO_PEERCRED` and appends it to `/etc/security/faceauth/<uid>.enc.json`.
-
-2. **Authentication**: The PAM module (or `faceauth test`) sends an `Authenticate` request to the daemon. The daemon loads the user's stored encodings from disk, opens the enrolled camera, and captures live frames in a loop until a match is found or the timeout expires. A match is declared when the Euclidean distance between a live encoding and a stored encoding is below `0.6` (the threshold recommended by dlib). The daemon reports success or failure back over the socket.
-
-3. **PAM integration**: The PAM module wraps the daemon call with panic catching to prevent C stack corruption, and maps results to appropriate PAM return codes.
-
-## Model Storage
-
-Models are stored as JSON files named by numeric UID (`/etc/security/faceauth/<uid>.enc.json`), with permissions `0640`, owned by the enrolled user. Using the UID means enrollments survive username renames. Writes are atomic (temp file + rename) to prevent corruption.
-
-Each file contains the camera identifiers and the face encoding batches. Legacy fields (`disabled`, `ignore`, `version`) in old model files are silently ignored on load.
-
-## Security Notes
-
-- Model files use `0640` permissions, owned by the enrolled user; readable by the user, not by others
-- The PAM module catches panics to safely interop with the C-based PAM stack
-- The 0.6 distance threshold is the standard dlib recommendation; tighter thresholds increase security at the cost of false rejections
-- Face authentication is refused for: remote sessions (`PAM_RHOST` set: SSH direct login), any process running inside an SSH session (detected by walking the process ancestor chain for `sshd`), and non-interactive processes (no `/dev/tty`, no `DISPLAY`/`WAYLAND_DISPLAY` in environment, and no active login session at `/run/systemd/users/<uid>`): cron jobs, systemd services, background scripts; all return `AUTHINFO_UNAVAIL` without contacting the daemon
+The session-bus daemon runs as you, without polkit, for testing the CLI,
+agent, and GUIs (`FACEAUTH_BUS=session faceauth-gui`,
+`FACEAUTH_BUS=session faceauth-settings`). `make GTK=0` and `make KCM=0`
+skip the GUIs. Translations: `make pot` regenerates the templates
+(`po/faceauth.pot`, `faceauth-kcm/po/kcm_faceauth.pot`) and merges the
+catalogs. Fuzzing: `cd fuzz && cargo +nightly fuzz run config` (or
+`model_json`). `tests/virtual-camera.sh N` checks that a virtual camera
+(`/dev/videoN`, e.g. from `modprobe vivid`) is refused. The D-Bus interface is documented
+in `data/dbus/io.github.gvarsanyi.FaceAuth1.Manager.xml`.
 
 ## License
 
-MIT; see [LICENSE](LICENSE).
+Licensed under either of [Apache License 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option. The dlib models are public domain
+(CC0); vendored crates keep their own licenses (see `vendor/`).
